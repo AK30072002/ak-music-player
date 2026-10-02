@@ -1,0 +1,89 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+def env = System.getenv()
+
+// One APK per phone type (set by the GitHub workflow):
+//   arm64-v8a   = 64-bit phones (almost all phones from 2017 on)  -> Python 3.13
+//   armeabi-v7a = 32-bit / "Android Go" phones                    -> Python 3.11 (newest for 32-bit)
+def abi = env.get('AK_ABI') ?: 'arm64-v8a'
+def pythonVersion = env.get('AK_PYTHON') ?: (abi == 'armeabi-v7a' ? '3.11' : '3.13')
+
+android {
+    namespace 'com.ak.musicplayer'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.ak.musicplayer'
+        minSdk 26          // Android 8.0+
+        targetSdk 34
+        versionCode Integer.parseInt(env.get('AK_VERSION_CODE') ?: '1')
+        versionName env.get('AK_VERSION_NAME') ?: '1.0.0'
+        ndk {
+            abiFilters abi
+        }
+    }
+
+    // The same key signs every build, so new versions install over old ones.
+    // To use a private key instead, set the GitHub secrets described in the README.
+    signingConfigs {
+        release {
+            storeFile file(env.get('AK_KEYSTORE') ?: 'ak-release.jks')
+            storePassword env.get('AK_KEYSTORE_PASSWORD') ?: 'akmusic123'
+            keyAlias env.get('AK_KEY_ALIAS') ?: 'akmusic'
+            keyPassword env.get('AK_KEY_PASSWORD') ?: 'akmusic123'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+        debug {
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // FFmpeg and QuickJS (src/main/jniLibs, downloaded by the workflow) are programs, not
+    // libraries: install them as real files so the app can run them, and don't strip them.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            keepDebugSymbols += ['**/libffmpeg.so', '**/libqjs.so']
+        }
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        version = pythonVersion
+        pip {
+            // pure-Python versions: nothing needs compiling for Android
+            install("fastapi==0.115.12")
+            install("pydantic==1.10.22")
+            install("uvicorn==0.34.3")
+            install("python-multipart==0.0.20")
+            install("yt-dlp")          // newest at build time; the app also updates it by itself
+            install("yt-dlp-ejs")      // YouTube challenge solver used with QuickJS
+        }
+    }
+    sourceSets {
+        getByName("main") {
+            srcDir("../../backend")    // app.py: the music server
+            srcDir("../../frontend")   // the player interface
+        }
+    }
+}

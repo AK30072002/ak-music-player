@@ -1,0 +1,16 @@
+# your music library (never commit it)
+data/
+# Python
+.venv/
+__pycache__/
+*.pyc
+# Android build output
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+!dist/*.apk
+.DS_Store
+# downloaded by the GitHub workflow (too big for Git)
+android/app/src/main/jniLibs/

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AK Music Player</title>
+<style>
+  :root { --bg:#14201a; --surface:#1b2a22; --line:#33493c; --text:#eef5ef; --muted:#a9bdb0; --accent:#f44336; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, Roboto, sans-serif; }
+  main { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 32px 24px; box-sizing: border-box; }
+  .disc { width: 168px; height: 168px; border-radius: 50%; background: radial-gradient(circle, #1d2b23 0 33%, #0b120e 34% 100%); display: grid; place-items: center; box-shadow: 0 24px 60px rgba(0,0,0,.45); animation: spin 4s linear infinite; }
+  .disc img { width: 46%; height: 46%; border-radius: 50%; object-fit: cover; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  h1 { font-size: 26px; margin: 28px 0 6px; letter-spacing: -.02em; }
+  p { color: var(--muted); margin: 0; max-width: 34ch; }
+  .err { display: none; margin-top: 22px; max-width: 420px; width: 100%; }
+  .err p { color: var(--text); margin-bottom: 14px; }
+  details { text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin-bottom: 16px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 11px; color: var(--muted); max-height: 40vh; overflow: auto; }
+  button { font: inherit; font-weight: 700; border: 0; border-radius: 999px; padding: 12px 28px; background: var(--accent); color: #fff; }
+  .failed .disc { animation-play-state: paused; filter: grayscale(.6); }
+  .failed .err { display: block; }
+  .failed #msg { display: none; }
+  @media (prefers-reduced-motion: reduce) { .disc { animation: none; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="disc"><img src="logo.png" alt=""></div>
+  <h1>AK Music Player</h1>
+  <p id="msg">Starting the music engine…</p>
+  <div class="err">
+    <p>The music engine couldn't start.</p>
+    <details><summary>Details</summary><pre id="detail"></pre></details>
+    <button id="retry">Try again</button>
+  </div>
+</main>
+<script>
+  const A = window.AKAndroid;
+  const msg = document.getElementById('msg');
+  setTimeout(() => { msg.textContent = 'First start takes a little longer while the app unpacks its music engine…'; }, 5000);
+  document.getElementById('retry').onclick = () => { document.body.classList.remove('failed'); A.retry(); };
+  function poll() {
+    let st = { state: 'starting' };
+    try { st = JSON.parse(A.engineState()); } catch (e) { }
+    if (st.state === 'ready') return setTimeout(() => A.openApp(), 1500);  // normally the app opens by itself
+    if (st.state === 'error') {
+      document.getElementById('detail').textContent = st.error || '';
+      document.body.classList.add('failed');
+    } else document.body.classList.remove('failed');
+    setTimeout(poll, 400);
+  }
+  poll();
+</script>
+</body>
+</html>

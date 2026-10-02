@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>AK Music Player</title>
+  <meta name="theme-color" content="#14201a">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="logo.png" type="image/png">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app" id="app">
+
+  <!-- ============ Sidebar ============ -->
+  <aside class="sidebar" aria-label="Navigation">
+    <a class="brand" href="#/home" aria-label="AK Music Player home">
+      <img src="logo.png" alt="" width="34" height="34">
+      <span>AK Music Player</span>
+    </a>
+    <nav class="nav">
+      <a href="#/home" data-nav="home"><i data-icon="home"></i>Home</a>
+      <a href="#/library" data-nav="library"><i data-icon="library"></i>Library</a>
+      <a href="#/liked" data-nav="liked"><i data-icon="heart"></i>Liked songs</a>
+      <a href="#/history" data-nav="history"><i data-icon="clock"></i>History</a>
+      <a href="#/settings" data-nav="settings"><i data-icon="settings"></i>Settings</a>
+    </nav>
+    <div class="side-head">
+      <h2>Playlists</h2>
+      <button class="icon-btn sm" id="newPlaylistBtn" title="New playlist" aria-label="New playlist"><i data-icon="plus"></i></button>
+    </div>
+    <div class="side-playlists" id="sidePlaylists"></div>
+  </aside>
+
+  <!-- ============ Main ============ -->
+  <main class="main" id="main">
+    <header class="topbar">
+      <form class="paste" id="pasteForm" data-paste autocomplete="off">
+        <i data-icon="link"></i>
+        <input id="pasteInput" type="url" inputmode="url" placeholder="Paste a YouTube, Instagram, SoundCloud… link" aria-label="Link to play">
+        <button type="button" class="ghost-btn" id="clipBtn" title="Paste from clipboard">Paste</button>
+        <button type="submit" class="primary-btn" id="pasteGo">Play</button>
+      </form>
+      <label class="icon-btn" title="Add audio files from your device" aria-label="Upload audio files">
+        <i data-icon="upload"></i>
+        <input type="file" id="uploadInput" accept="audio/*,.mp3,.m4a,.flac,.wav,.ogg,.opus,.webm" multiple hidden>
+      </label>
+    </header>
+    <div class="view" id="view" tabindex="-1"></div>
+  </main>
+
+  <!-- ============ Side panel (queue / lyrics / sound) ============ -->
+  <aside class="panel" id="panel" aria-label="Player panel" hidden>
+    <div class="panel-tabs" role="tablist">
+      <button role="tab" data-panel="queue">Queue</button>
+      <button role="tab" data-panel="lyrics">Lyrics</button>
+      <button role="tab" data-panel="sound">Sound</button>
+      <button class="icon-btn sm" id="panelClose" aria-label="Close panel"><i data-icon="x"></i></button>
+    </div>
+    <div class="panel-body" id="panelBody"></div>
+  </aside>
+
+  <!-- ============ Player bar ============ -->
+  <footer class="player" id="player">
+    <div class="np" id="npOpen" role="button" tabindex="0" aria-label="Open now playing">
+      <div class="disc mini" id="miniDisc"><div class="label"><img id="npArt" alt=""></div></div>
+      <div class="np-text">
+        <div class="np-title" id="npTitle">Nothing playing</div>
+        <div class="np-artist" id="npArtist">Paste a link to start</div>
+      </div>
+    </div>
+    <button class="icon-btn like-btn" id="likeBtn" aria-label="Like" aria-pressed="false"><i data-icon="heart"></i></button>
+
+    <div class="transport">
+      <div class="controls">
+        <button class="icon-btn sm" id="shuffleBtn" aria-label="Shuffle" aria-pressed="false"><i data-icon="shuffle"></i></button>
+        <button class="icon-btn" id="prevBtn" aria-label="Previous"><i data-icon="prev"></i></button>
+        <button class="play-btn" id="playBtn" aria-label="Play"><i data-icon="play"></i></button>
+        <button class="icon-btn" id="nextBtn" aria-label="Next"><i data-icon="next"></i></button>
+        <button class="icon-btn sm" id="repeatBtn" aria-label="Repeat: off" data-mode="off"><i data-icon="repeat"></i></button>
+      </div>
+      <div class="seek">
+        <span id="curTime">0:00</span>
+        <input type="range" id="seekBar" min="0" max="1000" value="0" step="1" aria-label="Seek">
+        <span id="durTime">0:00</span>
+      </div>
+    </div>
+
+    <div class="extras">
+      <button class="icon-btn sm" data-open-panel="lyrics" aria-label="Lyrics"><i data-icon="mic"></i></button>
+      <button class="icon-btn sm" data-open-panel="queue" aria-label="Queue"><i data-icon="queue"></i></button>
+      <button class="icon-btn sm" data-open-panel="sound" aria-label="Sound settings"><i data-icon="sliders"></i></button>
+      <button class="icon-btn sm" id="sleepBtn" aria-label="Sleep timer"><i data-icon="moon"></i><span class="badge" id="sleepBadge" hidden></span></button>
+      <button class="icon-btn sm" id="muteBtn" aria-label="Mute"><i data-icon="volume"></i></button>
+      <input type="range" id="volBar" min="0" max="100" value="80" aria-label="Volume">
+    </div>
+    <div class="mini-progress"><div id="miniProgress"></div></div>
+  </footer>
+
+  <!-- ============ Mobile tab bar ============ -->
+  <nav class="tabbar" aria-label="Mobile navigation">
+    <a href="#/home" data-nav="home"><i data-icon="home"></i><span>Home</span></a>
+    <a href="#/library" data-nav="library"><i data-icon="library"></i><span>Library</span></a>
+    <a href="#/playlists" data-nav="playlists"><i data-icon="list"></i><span>Playlists</span></a>
+    <a href="#/liked" data-nav="liked"><i data-icon="heart"></i><span>Liked</span></a>
+    <a href="#/settings" data-nav="settings"><i data-icon="settings"></i><span>Settings</span></a>
+  </nav>
+</div>
+
+<!-- ============ Now playing (full screen) ============ -->
+<section class="nowplaying" id="nowPlaying" hidden aria-label="Now playing">
+  <div class="np-bg" id="npBg"></div>
+  <header class="np-head">
+    <button class="icon-btn" id="npClose" aria-label="Close now playing"><i data-icon="down"></i></button>
+    <div class="np-from" id="npFrom">Playing from your library</div>
+    <button class="icon-btn" id="npMore" aria-label="More options"><i data-icon="more"></i></button>
+  </header>
+  <div class="np-stage">
+    <div class="turntable">
+      <canvas id="viz" width="720" height="720" aria-hidden="true"></canvas>
+      <div class="disc big" id="bigDisc"><div class="grooves"></div><div class="label"><img id="npBigArt" alt=""></div></div>
+    </div>
+    <div class="np-side">
+      <div class="np-meta">
+        <div>
+          <h1 id="npBigTitle">Nothing playing</h1>
+          <p id="npBigArtist"></p>
+        </div>
+        <button class="icon-btn like-btn" id="npLike" aria-label="Like"><i data-icon="heart"></i></button>
+      </div>
+      <div class="seek big">
+        <input type="range" id="npSeek" min="0" max="1000" value="0" aria-label="Seek">
+        <div class="times"><span id="npCur">0:00</span><span id="npDur">0:00</span></div>
+      </div>
+      <div class="controls big">
+        <button class="icon-btn" id="npShuffle" aria-label="Shuffle"><i data-icon="shuffle"></i></button>
+        <button class="icon-btn lg" id="npPrev" aria-label="Previous"><i data-icon="prev"></i></button>
+        <button class="play-btn lg" id="npPlay" aria-label="Play"><i data-icon="play"></i></button>
+        <button class="icon-btn lg" id="npNext" aria-label="Next"><i data-icon="next"></i></button>
+        <button class="icon-btn" id="npRepeat" aria-label="Repeat"><i data-icon="repeat"></i></button>
+      </div>
+      <div class="np-actions">
+        <button class="chip" id="npLyricsBtn"><i data-icon="mic"></i>Lyrics</button>
+        <button class="chip" id="npQueueBtn"><i data-icon="queue"></i>Queue</button>
+        <button class="chip" id="npDownload"><i data-icon="download"></i>Download</button>
+        <button class="chip" id="npSpeed">1×</button>
+      </div>
+      <div class="np-lyrics" id="npLyrics" hidden></div>
+    </div>
+  </div>
+</section>
+
+<div class="menu" id="menu" role="menu" hidden></div>
+<div class="modal-wrap" id="modal" hidden><div class="modal" role="dialog" aria-modal="true"></div></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<audio id="deckA" preload="auto"></audio>
+<audio id="deckB" preload="auto"></audio>
+
+<script src="app.js"></script>
+</body>
+</html>

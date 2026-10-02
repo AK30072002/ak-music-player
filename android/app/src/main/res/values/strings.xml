@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AK Music Player</string>
+    <string name="channel_name">Now playing</string>
+    <string name="channel_desc">Playback controls for AK Music Player</string>
+</resources>

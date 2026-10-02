@@ -1,0 +1,36 @@
+{
+  "name": "AK Music Player",
+  "short_name": "AK Music",
+  "description": "Paste any link, play the music. Ad-free, with playlists and downloads.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#14201a",
+  "theme_color": "#14201a",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "share_target": {
+    "action": "/",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  }
+}

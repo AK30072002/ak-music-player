@@ -1,0 +1,14 @@
+services:
+  ak-music-player:
+    build: .
+    container_name: ak-music-player
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+      # Optional: login cookies for Instagram / age-restricted videos (see README)
+      # - ./cookies.txt:/cookies.txt:ro
+    environment:
+      - AK_MP3_BITRATE=320k
+      # - AK_COOKIES=/cookies.txt
+    restart: unless-stopped
