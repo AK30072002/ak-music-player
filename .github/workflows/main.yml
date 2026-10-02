@@ -1,0 +1,105 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    name: APK (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: 64-bit
+            abi: arm64-v8a
+            python: '3.13'
+            qjs: qjs-linux-aarch64
+            qjs_sha256: 3372133484edf50a69f3c67903af41206d22a061e930e3cfb63269272ef56d2e
+            ffmpeg: ffmpeg-linux-arm64
+            ffmpeg_sha256: 6bb182d0d75d23028db82e9e4f723ca69b853d055698486e6984ddb2c06fb8ce
+          - label: 32-bit
+            abi: armeabi-v7a
+            python: '3.11'
+            qjs: qjs-linux-armv7
+            qjs_sha256: dbda6e499471c675bd991dbc477f14d6134c182409d15047e9b63e3df7bc3e64
+            ffmpeg: ffmpeg-linux-arm
+            ffmpeg_sha256: 0afba4a11110e6e402053e0fc14c33a7eb207d7a588688ae87dba471a0f06c71
+    env:
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Chaquopy needs the same Python version on the build machine as inside the app
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Download FFmpeg and QuickJS for ${{ matrix.abi }}
+        run: |
+          set -euo pipefail
+          DIR=android/app/src/main/jniLibs/${{ matrix.abi }}
+          mkdir -p "$DIR"
+          curl -fsSL -o "$DIR/libqjs.so" "https://github.com/quickjs-ng/quickjs/releases/download/v0.17.0/${{ matrix.qjs }}"
+          echo "${{ matrix.qjs_sha256 }}  $DIR/libqjs.so" | sha256sum -c -
+          curl -fsSL "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/${{ matrix.ffmpeg }}.gz" | gunzip > "$DIR/libffmpeg.so"
+          echo "${{ matrix.ffmpeg_sha256 }}  $DIR/libffmpeg.so" | sha256sum -c -
+          chmod 755 "$DIR"/*.so
+          ls -la "$DIR"
+
+      - name: Use private signing key (only if you added the secrets)
+        if: env.KEYSTORE_BASE64 != ''
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "AK_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          echo "AK_KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "AK_KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> "$GITHUB_ENV"
+          echo "AK_KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        working-directory: android
+        env:
+          AK_ABI: ${{ matrix.abi }}
+          AK_PYTHON: ${{ matrix.python }}
+        run: |
+          export AK_VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then export AK_VERSION_NAME="${GITHUB_REF_NAME#v}"; else export AK_VERSION_NAME="1.0.$GITHUB_RUN_NUMBER"; fi
+          gradle assembleRelease --no-daemon --stacktrace
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/AK-Music-Player-${{ matrix.label }}.apk"
+
+      - name: Check the APK contents
+        run: |
+          APK="AK-Music-Player-${{ matrix.label }}.apk"
+          unzip -l "$APK" > contents.txt
+          for f in "lib/${{ matrix.abi }}/libffmpeg.so" "lib/${{ matrix.abi }}/libqjs.so" "classes.dex" "assets/loading.html"; do
+            grep -q "$f" contents.txt || { echo "::error::$f is missing from the APK"; exit 1; }
+          done
+          grep -q "chaquopy" contents.txt || { echo "::error::Python (Chaquopy) is missing from the APK"; exit 1; }
+          ls -la "$APK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AK-Music-Player-${{ matrix.label }}
+          path: AK-Music-Player-${{ matrix.label }}.apk
+
+      - name: Attach APK to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AK-Music-Player-${{ matrix.label }}.apk
+          generate_release_notes: true
