@@ -1957,7 +1957,7 @@ async function viewSettings() {
       <span><kbd>M</kbd></span><span>Mute</span><span><kbd>F</kbd></span><span>Full-screen player</span>
       <span><kbd>Q</kbd></span><span>Queue</span><span><kbd>/</kbd></span><span>Paste a link</span>
       <span><kbd>Ctrl</kbd>+<kbd>V</kbd></span><span>Play a copied link from anywhere</span></div></section>
-    <section><h2>${IN_APP ? 'Music engine' : 'Server'}</h2><p>${health ? `yt-dlp ${esc(health.yt_dlp)}. FFmpeg ${health.ffmpeg ? 'installed' : IN_APP ? 'unavailable on this phone, so downloads keep the original quality' : '<b style="color:var(--danger)">not found</b> — install it to download MP3/FLAC'}. ${IN_APP ? `YouTube helper ${health.js_runtime ? 'ready' : '<b style="color:var(--danger)">unavailable</b> (some YouTube videos may not play)'}.` : `Login cookies ${health.cookies ? 'configured' : 'not set (needed for some Instagram posts)'}.`}` : "Can't reach the server."}</p></section>
+    <section><h2>${IN_APP ? 'Music engine' : 'Server'}</h2><p>${health ? `Version ${esc(health.version)}. yt-dlp ${esc(health.yt_dlp)}. FFmpeg ${health.ffmpeg ? 'installed' : IN_APP ? 'unavailable on this phone, so downloads keep the original quality' : '<b style="color:var(--danger)">not found</b> — install it to download MP3/FLAC'}. ${IN_APP ? `YouTube helper ${health.js_runtime ? 'ready' : '<b style="color:var(--danger)">unavailable</b> (some YouTube videos may not play)'}.` : `Login cookies ${health.cookies ? 'configured' : 'not set (needed for some Instagram posts)'}.`}` : "Can't reach the server."}</p></section>
   </div>`;
 }
 afterRender.settings = () => {

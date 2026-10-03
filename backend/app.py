@@ -53,7 +53,7 @@ MP3_BITRATE = os.environ.get("AK_MP3_BITRATE", "320k")
 ON_ANDROID = os.environ.get("AK_PLATFORM") == "android"   # running inside the Android app
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 HAS_FFPROBE = shutil.which("ffprobe") is not None
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 
 AUDIO_TYPES = {
@@ -1334,4 +1334,12 @@ async def http_error(request: Request, exc: HTTPException):
     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=getattr(exc, "headers", None))
 
 
-app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
+class PlayerFiles(StaticFiles):
+    """Serves the player and makes the app's browser re-check it on every start, so updates show up at once."""
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/", PlayerFiles(directory=FRONTEND, html=True), name="frontend")

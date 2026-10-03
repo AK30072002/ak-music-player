@@ -49,7 +49,7 @@ import java.util.regex.Pattern;
  */
 public class MainActivity extends Activity {
 
-    public static final String VERSION = "2.0.0";
+    public static final String VERSION = "2.0.1";
     static final String LOADING_URL = "file:///android_asset/loading.html";
 
     private static final int REQ_FILE = 11;
@@ -95,6 +95,7 @@ public class MainActivity extends Activity {
         s.setUserAgentString(s.getUserAgentString() + " AKMusicPlayerApp/" + VERSION);
         CookieManager.getInstance().setAcceptCookie(true);
 
+        clearCacheAfterUpdate();
         web.addJavascriptInterface(new Bridge(), "AKAndroid");
         web.setWebViewClient(new Client());
         web.setWebChromeClient(new Chrome());
@@ -140,6 +141,20 @@ public class MainActivity extends Activity {
                 else moveTaskToBack(true);   // keep playing, like other music apps
             }
         });
+    }
+
+    /** A newly installed version must never show the previous version's player screens. */
+    @SuppressWarnings("deprecation")
+    private void clearCacheAfterUpdate() {
+        try {
+            long installed = getPackageManager().getPackageInfo(getPackageName(), 0).lastUpdateTime;
+            android.content.SharedPreferences sp = getSharedPreferences("ak_app", MODE_PRIVATE);
+            if (sp.getLong("web_cache_for", 0) != installed) {
+                web.clearCache(true);
+                sp.edit().putLong("web_cache_for", installed).apply();
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     // ------------------------------------------------------------------ engine & navigation
