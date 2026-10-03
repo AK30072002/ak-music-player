@@ -16,6 +16,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -27,6 +28,8 @@ from pathlib import Path
 from typing import Optional
 
 import yt_dlp
+
+import musiclinks
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -50,7 +53,7 @@ MP3_BITRATE = os.environ.get("AK_MP3_BITRATE", "320k")
 ON_ANDROID = os.environ.get("AK_PLATFORM") == "android"   # running inside the Android app
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 HAS_FFPROBE = shutil.which("ffprobe") is not None
-APP_VERSION = "1.0.0"
+APP_VERSION = "2.0.0"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 
 AUDIO_TYPES = {
@@ -292,6 +295,11 @@ def ensure_audio(tid: str) -> Path:
         t = con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
     if not t:
         raise HTTPException(404, "Track not found")
+    if t["file"] and os.path.isabs(t["file"]):          # a song that lives on the phone itself
+        p = Path(t["file"])
+        if p.exists():
+            return p
+        raise HTTPException(404, "This song is no longer on the phone")
     existing = find_audio(tid)
     if existing:
         return existing
@@ -299,6 +307,16 @@ def ensure_audio(tid: str) -> Path:
         existing = find_audio(tid)
         if existing:
             return existing
+        source = t["source_url"]
+        if source.startswith(MUSIC_SEARCH):          # a song shared from Spotify, Apple Music, …
+            q = urllib.parse.parse_qs(source[len(MUSIC_SEARCH):])
+            want = (q.get("d") or [""])[0]
+            try:
+                source = find_youtube((q.get("q") or [""])[0], float(want) if want else None)
+            except HTTPException as e:
+                with db() as con:
+                    con.execute("UPDATE tracks SET status='error', error=? WHERE id=?", (e.detail, tid))
+                raise
         opts = ydl_base_opts()
         opts.update({
             "format": "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best",
@@ -309,7 +327,7 @@ def ensure_audio(tid: str) -> Path:
             opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}]
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(t["source_url"], download=True)
+                info = ydl.extract_info(source, download=True)
         except Exception as e:
             msg = clean_err(e)
             with db() as con:
@@ -353,6 +371,40 @@ def probe_duration(path: Path) -> Optional[float]:
         return float(r.stdout.strip())
     except ValueError:
         return None
+
+
+MUSIC_SEARCH = "music-search:"
+_SKIP_WORDS = ("live", "cover", "karaoke", "remix", "8d", "slowed", "reverb", "nightcore", "instrumental",
+               "sped up", "lofi", "lo-fi", "reaction", "tutorial", "lesson", "mashup", "bass boosted")
+
+
+def find_youtube(query: str, duration: Optional[float] = None) -> str:
+    """Best YouTube match for a song from a music app: early result, right length, not a cover/live/remix."""
+    opts = ydl_base_opts()
+    opts.update({"extract_flat": "in_playlist", "skip_download": True, "noplaylist": False})
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"ytsearch8:{query}", download=False)
+    except Exception as e:
+        raise HTTPException(502, clean_err(e))
+    entries = [e for e in (info or {}).get("entries") or [] if e and e.get("id")]
+    if not entries:
+        raise HTTPException(404, "Couldn't find this song on YouTube")
+    q = query.lower()
+
+    def score(item):
+        i, e = item
+        title = (e.get("title") or "").lower()
+        s = i * 3.0
+        s += sum(25 for w in _SKIP_WORDS if w in title and w not in q)
+        if duration and e.get("duration"):
+            s += min(abs(float(e["duration"]) - duration), 180) / 3
+        if "official audio" in title or (e.get("channel") or e.get("uploader") or "").endswith(" - Topic"):
+            s -= 4
+        return s
+
+    best = min(enumerate(entries), key=score)[1]
+    return best.get("url") if str(best.get("url", "")).startswith("http") else f"https://www.youtube.com/watch?v={best['id']}"
 
 
 def clean_err(e: Exception) -> str:
@@ -501,7 +553,7 @@ class TrackIds(BaseModel):
 def health():
     return {"ok": True, "app": "ak-music-player", "version": APP_VERSION, "ffmpeg": HAS_FFMPEG,
             "android": ON_ANDROID, "formats": ["mp3", "m4a", "flac", "original"] if HAS_FFMPEG else ["original"],
-            "yt_dlp": yt_dlp.version.__version__, "js_runtime": next(iter(JS_RUNTIMES), None),
+            "editing": HAS_FFMPEG, "yt_dlp": yt_dlp.version.__version__, "js_runtime": next(iter(JS_RUNTIMES), None),
             "cookies": bool(COOKIES_BROWSER or (COOKIES_FILE and Path(COOKIES_FILE).exists()))}
 
 
@@ -513,6 +565,8 @@ def add_link(body: AddLink):
     if not m:
         raise HTTPException(400, "That doesn't look like a link. Paste a full URL starting with http.")
     url = m.group(0)
+    if musiclinks.service_of(url):
+        return _add_music_link(body, url)
     opts = ydl_base_opts()
     opts.update({"extract_flat": "in_playlist", "noplaylist": False, "skip_download": True})
     try:
@@ -548,6 +602,51 @@ def add_link(body: AddLink):
             _add_to_playlist(con, body.playlist_id, [t["id"] for t in tracks])
     if not tracks:
         raise HTTPException(422, "No playable items found at that link")
+    for t in tracks[:1]:
+        threading.Thread(target=cache_cover, args=(t["id"], t.get("thumbnail")), daemon=True).start()
+    return {"tracks": tracks, "playlist": playlist}
+
+
+def _add_music_link(body: AddLink, url: str) -> dict:
+    """Spotify, Apple Music, Amazon Music, Deezer, Tidal, Gaana, Wynk… → library songs played from YouTube."""
+    import hashlib
+    try:
+        res = musiclinks.resolve(url)
+    except musiclinks.LinkError as e:
+        raise HTTPException(422, str(e))
+    service = res["service"]
+    if res["kind"] == "youtube_playlist":        # the whole album exists on YouTube Music
+        out = add_link(AddLink(url=res["url"], as_playlist=body.as_playlist, playlist_id=body.playlist_id))
+        if out.get("playlist") and res.get("title"):
+            with db() as con:
+                con.execute("UPDATE playlists SET name=?, description=?, source_url=? WHERE id=?",
+                            (res["title"], f"Imported from {service}", url, out["playlist"]["id"]))
+                out["playlist"] = playlist_summary(con, out["playlist"]["id"])
+        return out
+    tracks, playlist = [], None
+    now = time.time()
+    with db() as con:
+        for t in res["tracks"]:
+            key = t.get("id") or hashlib.sha1(f"{t['artist']}|{t['title']}".lower().encode()).hexdigest()[:16]
+            tid = safe_id(f"{service}-{key}".lower().replace(" ", ""))
+            row_ = con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
+            if not row_:
+                source = t.get("youtube") or MUSIC_SEARCH + urllib.parse.urlencode(
+                    {"q": musiclinks.search_query(t), "d": round(t["duration"], 1) if t.get("duration") else ""})
+                con.execute("""INSERT INTO tracks (id, source_url, platform, title, artist, album, duration, thumbnail, status, added_at)
+                               VALUES (?,?,?,?,?,?,?,?, 'new', ?)""",
+                            (tid, source, service, t["title"], t["artist"], t["album"], t["duration"], t["thumbnail"], now))
+                row_ = con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
+            tracks.append(track_out(row_))
+        if res["kind"] == "collection" and body.as_playlist and len(tracks) > 1 and not body.playlist_id:
+            pid = uuid.uuid4().hex[:12]
+            con.execute("INSERT INTO playlists (id,name,description,source_url,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                        (pid, res.get("title") or f"{service} playlist", f"Imported from {service}", url, now, now))
+            for i, t in enumerate(tracks):
+                con.execute("INSERT OR IGNORE INTO playlist_tracks VALUES (?,?,?,?)", (pid, t["id"], i, now))
+            playlist = playlist_summary(con, pid)
+        if body.playlist_id:
+            _add_to_playlist(con, body.playlist_id, [t["id"] for t in tracks])
     for t in tracks[:1]:
         threading.Thread(target=cache_cover, args=(t["id"], t.get("thumbnail")), daemon=True).start()
     return {"tracks": tracks, "playlist": playlist}
@@ -642,7 +741,9 @@ def delete_track(tid: str):
         con.execute("DELETE FROM tracks WHERE id=?", (tid,))
     for folder in (AUDIO_DIR, COVER_DIR, EXPORT_DIR):
         for p in folder.glob(f"{tid}.*"):
-            p.unlink(missing_ok=True)
+            p.unlink(missing_ok=True)       # only the app's own copies; songs on the phone are never touched here
+    for p in (DATA / "waves").glob(f"{tid}-*.json"):
+        p.unlink(missing_ok=True)
     return {"ok": True}
 
 
@@ -851,6 +952,287 @@ def download_playlist(pid: str, format: str = "mp3"):
     return FileResponse(zpath, media_type="application/zip", filename=f"{name}.zip")
 
 
+# ---------- version 2: song editor, combining songs, songs already on the phone
+WAVE_DIR = DATA / "waves"
+WAVE_DIR.mkdir(parents=True, exist_ok=True)
+DEVICE_ROOTS = ("/storage/", "/sdcard/", "/mnt/sdcard/")
+
+
+def _need_ffmpeg():
+    if not HAS_FFMPEG:
+        raise HTTPException(501, "Editing needs FFmpeg, which isn't available on this device.")
+
+
+def _duration_of(t, path: Path) -> float:
+    d = t["duration"] or probe_duration(path)
+    if not d:
+        raise HTTPException(422, "Couldn't read the length of this song")
+    return float(d)
+
+
+@app.get("/api/tracks/{tid}/waveform")
+def waveform(tid: str, points: int = 800):
+    """Peak levels (0–1) for drawing the song in the editor."""
+    import array
+    points = max(50, min(int(points), 3000))
+    cache = WAVE_DIR / f"{tid}-{points}.json"
+    if cache.exists():
+        return JSONResponse(json.loads(cache.read_text()))
+    _need_ffmpeg()
+    with db() as con:
+        t = con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
+    if not t:
+        raise HTTPException(404, "Track not found")
+    src = ensure_audio(tid)
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(src), "-ac", "1", "-ar", "4000", "-f", "s16le", "-"],
+                       capture_output=True)
+    if r.returncode != 0 or not r.stdout:
+        raise HTTPException(500, "Couldn't read the audio for the waveform")
+    samples = array.array("h")
+    samples.frombytes(r.stdout[: len(r.stdout) // 2 * 2])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    n = len(samples)
+    step = max(1, n // points)
+    peaks = []
+    for i in range(0, n, step):
+        chunk = samples[i:i + step]
+        peaks.append(round(max(max(chunk), -min(chunk)) / 32768, 3))
+    top = max(peaks) or 1
+    data = {"duration": n / 4000, "peaks": [round(p / top, 3) for p in peaks[:points]]}
+    with db() as con:
+        if not t["duration"]:
+            con.execute("UPDATE tracks SET duration=? WHERE id=?", (data["duration"], tid))
+    cache.write_text(json.dumps(data))
+    return data
+
+
+class TrimIn(BaseModel):
+    track_id: str
+    start: float = 0
+    end: Optional[float] = None
+    cuts: list[list[float]] = []       # parts to remove from the middle: [[from, to], ...]
+    fade_in: float = 0
+    fade_out: float = 0
+    title: Optional[str] = None
+
+
+def keep_segments(duration: float, start: float, end: Optional[float], cuts: list) -> list[tuple[float, float]]:
+    """The parts of the song that stay, after trimming the ends and removing the cuts."""
+    end = duration if end is None else end
+    start, end = max(0.0, float(start)), min(float(duration), float(end))
+    if end - start < 0.5:
+        raise HTTPException(400, "The part you keep must be at least half a second long")
+    ranges = sorted((max(start, min(a, b)), min(end, max(a, b))) for a, b in (c[:2] for c in cuts if len(c) >= 2))
+    merged: list[list[float]] = []
+    for a, b in ranges:
+        if b - a < 0.05:
+            continue
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    keep, pos = [], start
+    for a, b in merged:
+        if a - pos > 0.02:
+            keep.append((pos, a))
+        pos = max(pos, b)
+    if end - pos > 0.02:
+        keep.append((pos, end))
+    if sum(b - a for a, b in keep) < 0.5:
+        raise HTTPException(400, "That would remove the whole song. Keep at least half a second.")
+    return keep
+
+
+def _save_new_track(tid: str, out: Path, title: str, artist: str, album: str, platform: str,
+                    source: str, cover_from: Optional[str] = None) -> dict:
+    duration = probe_duration(out)
+    with db() as con:
+        con.execute("""INSERT INTO tracks (id, source_url, platform, title, artist, album, duration, status, file, added_at)
+                       VALUES (?,?,?,?,?,?,?,'ready',?,?)""",
+                    (tid, source, platform, title, artist, album, duration, out.name, time.time()))
+        if cover_from:   # reuse the original artwork
+            src = _cover_path(cover_from)
+            if src:
+                shutil.copy(src, COVER_DIR / f"{tid}{src.suffix}")
+        return track_out(con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone())
+
+
+def _run_ffmpeg(cmd: list[str]):
+    r = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+    if r.returncode != 0:
+        raise HTTPException(500, "Editing failed: " + (r.stderr.strip().splitlines() or ["unknown error"])[-1][:300])
+
+
+@app.post("/api/edit/trim")
+def edit_trim(body: TrimIn):
+    """Trim the start/end and cut parts out of the middle. Saves a NEW song; the original is untouched."""
+    _need_ffmpeg()
+    with db() as con:
+        t = con.execute("SELECT * FROM tracks WHERE id=?", (body.track_id,)).fetchone()
+    if not t:
+        raise HTTPException(404, "Track not found")
+    src = ensure_audio(t["id"])
+    dur = _duration_of(t, src)
+    keep = keep_segments(dur, body.start, body.end, body.cuts)
+    total = sum(b - a for a, b in keep)
+    fi = max(0.0, min(float(body.fade_in), total / 2))
+    fo = max(0.0, min(float(body.fade_out), total / 2))
+
+    n = len(keep)
+    parts, labels = [f"[0:a]asplit={n}" + "".join(f"[s{i}]" for i in range(n))], []
+    for i, (a, b) in enumerate(keep):
+        f = f"[s{i}]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS"
+        if n > 1:   # tiny fades at the joins so the cuts don't click
+            seg = b - a
+            d = min(0.008, seg / 4)
+            if i > 0:
+                f += f",afade=t=in:d={d:.4f}"
+            if i < n - 1:
+                f += f",afade=t=out:st={seg - d:.4f}:d={d:.4f}"
+        parts.append(f + f"[k{i}]")
+        labels.append(f"[k{i}]")
+    chain = "".join(labels) + (f"concat=n={n}:v=0:a=1" if n > 1 else "anull")
+    if fi > 0:
+        chain += f",afade=t=in:st=0:d={fi:.3f}"
+    if fo > 0:
+        chain += f",afade=t=out:st={total - fo:.3f}:d={fo:.3f}"
+    parts.append(chain + "[out]")
+
+    title = (body.title or f"{t['title']} (edit)").strip()[:200]
+    tid = f"edit-{uuid.uuid4().hex[:12]}"
+    out = AUDIO_DIR / f"{tid}.m4a"
+    _run_ffmpeg(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-filter_complex", ";".join(parts),
+                 "-map", "[out]", "-vn", "-c:a", "aac", "-b:a", "256k",
+                 "-metadata", f"title={title}", "-metadata", f"artist={t['artist'] or ''}", str(out)])
+    return _save_new_track(tid, out, title, t["artist"] or "", t["album"] or "", "Edited",
+                           f"edit://{t['id']}", cover_from=t["id"])
+
+
+class MergeIn(BaseModel):
+    track_ids: list[str]
+    crossfade: float = 0      # seconds of overlap between songs
+    gap: float = 0            # seconds of silence between songs (when not crossfading)
+    title: Optional[str] = None
+
+
+@app.post("/api/edit/merge")
+def edit_merge(body: MergeIn):
+    """Join songs one after another into a NEW song."""
+    _need_ffmpeg()
+    if len(body.track_ids) < 2:
+        raise HTTPException(400, "Choose at least two songs to combine")
+    if len(body.track_ids) > 30:
+        raise HTTPException(400, "You can combine up to 30 songs at a time")
+    rows, paths, durs = [], [], []
+    for tid in body.track_ids:
+        with db() as con:
+            t = con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
+        if not t:
+            raise HTTPException(404, "One of the songs is no longer in your library")
+        p = ensure_audio(tid)
+        rows.append(t)
+        paths.append(p)
+        durs.append(_duration_of(t, p))
+    n = len(paths)
+    xf = max(0.0, min(float(body.crossfade), 10.0, min(durs) / 2 - 0.1))
+    gap = 0.0 if xf > 0 else max(0.0, min(float(body.gap), 10.0))
+
+    cmd = ["ffmpeg", "-y", "-v", "error"]
+    for p in paths:
+        cmd += ["-i", str(p)]
+    f = []
+    for i in range(n):
+        pad = f",apad=pad_dur={gap:.3f}" if gap > 0 and i < n - 1 else ""
+        f.append(f"[{i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo{pad}[a{i}]")
+    if xf > 0:
+        prev = "a0"
+        for i in range(1, n):
+            nxt = "out" if i == n - 1 else f"x{i}"
+            f.append(f"[{prev}][a{i}]acrossfade=d={xf:.3f}:c1=tri:c2=tri[{nxt}]")
+            prev = nxt
+    else:
+        f.append("".join(f"[a{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[out]")
+
+    artists = []
+    for t in rows:
+        if t["artist"] and t["artist"] not in artists:
+            artists.append(t["artist"])
+    title = (body.title or " + ".join(t["title"] for t in rows[:3]) + (" …" if n > 3 else "")).strip()[:200]
+    artist = ", ".join(artists[:3]) + (" & more" if len(artists) > 3 else "")
+    tid = f"mix-{uuid.uuid4().hex[:12]}"
+    out = AUDIO_DIR / f"{tid}.m4a"
+    _run_ffmpeg(cmd + ["-filter_complex", ";".join(f), "-map", "[out]", "-vn", "-c:a", "aac", "-b:a", "256k",
+                       "-metadata", f"title={title}", "-metadata", f"artist={artist}", str(out)])
+    return _save_new_track(tid, out, title, artist, "Combined songs", "Mix",
+                           "mix://" + ",".join(body.track_ids), cover_from=rows[0]["id"])
+
+
+class DeviceItem(BaseModel):
+    path: str
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    duration: Optional[float] = None
+
+
+class DeviceLink(BaseModel):
+    items: list[DeviceItem]
+
+
+class DevicePaths(BaseModel):
+    paths: list[str]
+
+
+def _device_id(path: str) -> str:
+    import hashlib
+    return "phone-" + hashlib.sha1(path.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _check_device_path(path: str) -> Path:
+    if not ON_ANDROID and not os.environ.get("AK_ALLOW_DEVICE"):
+        raise HTTPException(403, "Songs on the phone are only available in the Android app")
+    p = Path(path)
+    if not p.is_absolute() or not any(str(p).startswith(r) for r in DEVICE_ROOTS) or ".." in p.parts:
+        raise HTTPException(400, "That file isn't in the phone's shared storage")
+    return p
+
+
+@app.post("/api/device/link")
+def device_link(body: DeviceLink):
+    """Make songs that are already on the phone playable in AK Music Player — without copying them."""
+    out = []
+    with db() as con:
+        for it in body.items[:2000]:
+            p = _check_device_path(it.path)
+            tid = _device_id(str(p))
+            title = (it.title or p.stem).strip() or p.stem
+            existing = con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
+            if existing:
+                con.execute("UPDATE tracks SET file=?, status='ready' WHERE id=?", (str(p), tid))
+            else:
+                con.execute("""INSERT INTO tracks (id, source_url, platform, title, artist, album, duration, status, file, added_at)
+                               VALUES (?,?,?,?,?,?,?,'ready',?,?)""",
+                            (tid, "file://" + str(p), "Phone", title, (it.artist or "").replace("<unknown>", ""),
+                             (it.album or ""), it.duration, str(p), time.time()))
+            out.append(track_out(con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()))
+    return out
+
+
+@app.post("/api/device/forget")
+def device_forget(body: DevicePaths):
+    """After a phone file is deleted, remove it from the library too."""
+    ids = [_device_id(str(Path(p))) for p in body.paths]
+    with db() as con:
+        for tid in ids:
+            con.execute("DELETE FROM tracks WHERE id=?", (tid,))
+    for tid in ids:
+        for folder in (COVER_DIR, EXPORT_DIR, WAVE_DIR):
+            for f in folder.glob(f"{tid}*"):
+                f.unlink(missing_ok=True)
+    return {"ok": True, "removed": len(ids), "ids": ids}
+
+
 # ---------- home / history / stats
 @app.get("/api/home")
 def home():
@@ -930,8 +1312,8 @@ async def restore(file: UploadFile = File(...)):
         raise HTTPException(400, "That file isn't an AK Music Player backup")
     with db() as con:
         for t in data["tracks"]:
-            if t["id"].startswith("upload-"):
-                continue  # uploaded audio files aren't in the backup
+            if t["id"].startswith(("upload-", "edit-", "mix-", "phone-")):
+                continue  # these songs' audio files aren't in the backup
             cols = [c for c in t if c in ("id", "source_url", "platform", "title", "artist", "album", "duration",
                                           "thumbnail", "liked", "liked_at", "play_count", "added_at", "last_played")]
             con.execute(f"INSERT OR IGNORE INTO tracks ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",

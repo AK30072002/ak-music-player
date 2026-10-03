@@ -76,6 +76,13 @@ const ICONS = {
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   check: '<path d="M5 12l5 5 9-10"/>',
   refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/>',
+  phone: '<rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
+  scissors: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.1 8.1 20 20M8.1 15.9 20 4"/>',
+  merge: '<path d="M4 6h6l4 6-4 6H4M14 12h7M18 9l3 3-3 3"/>',
+  up: '<path d="M6 15l6-6 6 6"/>',
+  box: '<rect x="4" y="4" width="16" height="16" rx="3"/>',
+  boxChecked: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 12l3 3 5-6"/>',
+  save: '<path d="M5 3h11l3 3v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M7 3v5h8V3M7 21v-7h10v7"/>',
 };
 const svg = n => {
   const d = ICONS[n] || ICONS.music;
@@ -976,6 +983,8 @@ function trackMenu(t, ctx = {}) {
     { label: t.liked ? 'Remove from Liked songs' : 'Add to Liked songs', icon: 'heart', action: () => toggleLike(t) },
     { sep: true },
     { label: 'Download', icon: 'download', sub: () => downloadSub(t) },
+    { label: 'Edit / trim song', icon: 'scissors', action: () => { location.hash = `#/edit/${encodeURIComponent(t.id)}`; } },
+    { label: 'Combine with other songs', icon: 'merge', action: () => { location.hash = `#/combine?ids=${encodeURIComponent(t.id)}`; } },
     { label: 'Edit details', icon: 'edit', action: () => editTrack(t) },
   ];
   if (t.artist) items.push({ label: `More by ${t.artist}`, icon: 'user', action: () => { location.hash = `#/library?q=${encodeURIComponent(t.artist)}`; } });
@@ -1001,13 +1010,14 @@ async function addLink(raw, { mode = settings.onPaste, playlistId } = {}) {
   if (!/https?:\/\//i.test(url)) { toast('Paste a full link that starts with http:// or https://', { error: true }); return; }
   $$('[data-paste]').forEach(f => f.classList.add('busy'));
   const tst = toast('<span class="spinner"></span> Looking up that link…', { sticky: true, html: true });
+  const musicApp = /spotify|music\.apple|music\.amazon|amazon\.[a-z.]+\/music|deezer|tidal|gaana|wynk|hungama|resso|boomplay|anghami|shazam/i.test(url);
   try {
     const r = await api('/add', { method: 'POST', body: { url, playlist_id: playlistId || null } });
     $$('[data-paste] input[type="url"]').forEach(i => { i.value = ''; });
     const n = r.tracks.length;
     if (r.playlist) {
       await refreshPlaylists();
-      toast(`Saved playlist “${r.playlist.name}” with ${r.playlist.track_count} songs`);
+      toast(`Saved playlist “${r.playlist.name}” with ${r.playlist.track_count} songs` + (musicApp ? '. Each song is found on YouTube when you play it.' : ''), { ms: musicApp ? 6000 : 3800 });
       if (mode === 'play') playList(r.tracks, 0, { from: r.playlist.name });
       else if (mode === 'queue') addToQueue(r.tracks);
       location.hash = `#/playlist/${r.playlist.id}`;
@@ -1136,7 +1146,9 @@ async function route() {
   $$('[data-nav]').forEach(a => a.classList.toggle('active', a.dataset.nav === r.name || (r.name === 'playlist' && a.dataset.nav === 'playlists')));
   document.body.classList.toggle('on-home', r.name === 'home');
   renderSidebar();
-  const views = { home: viewHome, library: viewLibrary, liked: viewLiked, history: viewHistory, playlist: viewPlaylist, playlists: viewPlaylists, settings: viewSettings };
+  edCleanup();
+  const views = { home: viewHome, library: viewLibrary, liked: viewLiked, history: viewHistory, playlist: viewPlaylist, playlists: viewPlaylists, settings: viewSettings,
+    phone: viewPhone, edit: viewEdit, combine: viewCombine };
   try {
     const html = await (views[r.name] || viewHome)(r, token);
     if (token !== routeToken || html === undefined) return;
@@ -1156,12 +1168,12 @@ async function viewHome() {
   const st = h.stats;
   const hero = `<section class="hero">
     <h1>What are we playing?</h1>
-    <p>Paste a link from YouTube, Instagram, SoundCloud or 1,000+ other sites. AK Music Player plays just the audio, with no ads, and keeps it in your library.</p>
+    <p>Paste or share a link from YouTube, Instagram, Spotify, Apple Music, Amazon Music or 1,000+ other sites. AK Music Player plays just the audio, with no ads, and keeps it in your library.</p>
     <form class="paste" data-paste autocomplete="off">${ic('link')}
       <input type="url" inputmode="url" placeholder="https://…" aria-label="Link to play">
       <label class="icon-btn sm" title="Add audio files" aria-label="Upload audio files">${ic('upload')}<input type="file" accept="audio/*" multiple hidden data-upload></label>
       <button class="primary-btn">Play</button></form>
-    <div class="sources"><span>YouTube &amp; YouTube Music</span><span>Instagram reels</span><span>SoundCloud</span><span>TikTok</span><span>Vimeo</span><span>Bandcamp</span><span>X / Twitter</span><span>Playlists</span></div>
+    <div class="sources"><span>YouTube &amp; YouTube Music</span><span>Instagram reels</span><span>Spotify</span><span>Apple Music</span><span>Amazon Music</span><span>JioSaavn</span><span>Gaana</span><span>Wynk</span><span>SoundCloud</span><span>Deezer</span><span>TikTok</span><span>Playlists &amp; albums</span></div>
     ${st.tracks ? `<div class="stats"><div><b>${st.tracks}</b>song${st.tracks === 1 ? '' : 's'}</div><div><b>${st.plays}</b>play${st.plays === 1 ? '' : 's'}</div><div><b>${st.minutes.toLocaleString()}</b>minutes listened</div><div><b>${S.playlists.length}</b>playlist${S.playlists.length === 1 ? '' : 's'}</div></div>` : ''}
   </section>`;
   if (!st.tracks) {
@@ -1192,7 +1204,8 @@ async function viewLibrary(r) {
   const platforms = [...new Set(all.map(t => t.platform).filter(Boolean))].sort();
   const total = tracks.reduce((s, t) => s + (t.duration || 0), 0);
   return `<div class="view-head"><div><h1>Library</h1><p class="sub">${tracks.length} song${tracks.length === 1 ? '' : 's'}${total ? ', ' + fmtLong(total) : ''}</p></div>
-      <div class="actions"><button class="chip" data-act="play-all">${ic('play')}Play all</button><button class="chip" data-act="shuffle-all">${ic('shuffle')}Shuffle</button></div></div>
+      <div class="actions"><button class="chip" data-act="play-all">${ic('play')}Play all</button><button class="chip" data-act="shuffle-all">${ic('shuffle')}Shuffle</button>
+      <a class="chip" href="#/combine">${ic('merge')}Combine songs</a></div></div>
     <div class="toolbar">
       <div class="search">${ic('search')}<input id="libSearch" type="search" placeholder="Search songs, artists, albums" value="${esc(lib.q)}" aria-label="Search library"></div>
       <select class="select" id="libSort" aria-label="Sort by">${[['added', 'Recently added'], ['title', 'Title'], ['artist', 'Artist'], ['plays', 'Most played'], ['recent', 'Recently played'], ['duration', 'Longest']].map(([v, l]) => `<option value="${v}" ${lib.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
@@ -1303,6 +1316,606 @@ function playlistMenu(p, anchor) {
   ], anchor);
 }
 
+/* ================================================================ version 2: editor, combine, phone */
+const parseTime = str => {
+  const s = String(str ?? '').trim().replace(',', '.');
+  if (!s || !/^[\d:.]+$/.test(s)) return NaN;
+  const parts = s.split(':');
+  if (parts.length > 3 || parts.some(p => p === '' || isNaN(+p))) return NaN;
+  return parts.reduce((acc, p) => acc * 60 + +p, 0);
+};
+const fmtPrecise = sec => {
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  sec = Math.round(sec * 10) / 10;
+  const m = Math.floor(sec / 60), r = sec - m * 60;
+  return `${m}:${r.toFixed(1).padStart(4, '0')}`;
+};
+const editingAvailable = () => !(S.health && S.health.editing === false);
+const noEditing = () => `<div class="empty"><h3>Editing isn't available here</h3><p>Editing needs FFmpeg, which couldn't run on this device. Playing and downloading still work.</p></div>`;
+function resultPanel(t, again) {
+  const fmt = (S.health?.formats || []).includes('mp3') ? 'mp3' : 'original';
+  return `<div class="done-card">${ic('check')}<div class="done-text"><b>Saved “${esc(t.title)}”</b><span>${fmtTime(t.duration)} long, now in your library</span></div>
+    <div class="row-btns"><button class="chip on" data-done="play">${ic('play')}Play</button>
+    <button class="chip" data-done="download" data-fmt="${fmt}">${ic('download')}${IN_APP ? 'Save to phone' : 'Download'}${fmt === 'mp3' ? ' (MP3)' : ''}</button>
+    <a class="chip" href="#/edit/${encodeURIComponent(t.id)}">${ic('scissors')}${again}</a></div></div>`;
+}
+function wireResult(box, t) {
+  box.querySelector('[data-done="play"]').onclick = () => playNow(t);
+  box.querySelector('[data-done="download"]').onclick = e => downloadTrack(t, e.currentTarget.dataset.fmt);
+}
+
+/* ---------- song editor */
+let ED = null;
+function edCleanup() {
+  if (!ED) return;
+  cancelAnimationFrame(ED.raf);
+  try { ED.audio.pause(); ED.audio.removeAttribute('src'); ED.audio.load(); } catch { }
+  ED = null;
+}
+function edMergedCuts() {
+  const r = ED.cuts.map(c => [Math.max(ED.start, Math.min(c.a, c.b)), Math.min(ED.end, Math.max(c.a, c.b))])
+    .filter(([a, b]) => b - a >= 0.05).sort((x, y) => x[0] - y[0]);
+  const out = [];
+  for (const [a, b] of r) {
+    if (out.length && a <= out[out.length - 1][1]) out[out.length - 1][1] = Math.max(out[out.length - 1][1], b);
+    else out.push([a, b]);
+  }
+  return out;
+}
+function edKeep() {
+  const keep = []; let pos = ED.start;
+  for (const [a, b] of edMergedCuts()) { if (a - pos > 0.02) keep.push([pos, a]); pos = Math.max(pos, b); }
+  if (ED.end - pos > 0.02) keep.push([pos, ED.end]);
+  return keep;
+}
+const edNewLength = () => edKeep().reduce((s, [a, b]) => s + (b - a), 0);
+function edPosInEdit(t) {
+  let e = 0;
+  for (const [a, b] of edKeep()) { if (t >= b) e += b - a; else { if (t > a) e += t - a; break; } }
+  return e;
+}
+
+async function viewEdit(r) {
+  if (!editingAvailable()) return noEditing();
+  const t = await api(`/tracks/${r.id}`);
+  const quick = (k, s, l) => `<button class="chip" data-ed="${k}" data-sec="${s}">${l}</button>`;
+  return `<div class="view-head"><div><h1>Edit song</h1><p class="sub">${esc(t.title)}${t.artist ? ' by ' + esc(t.artist) : ''}</p></div></div>
+  <div class="editor" id="editor" data-id="${esc(t.id)}">
+    <div class="wave-wrap"><canvas id="wave" aria-label="Song waveform. Tap to move the playhead."></canvas>
+      <div class="wave-msg" id="waveMsg"><span class="spinner"></span> Getting the song ready…</div></div>
+    <div class="ed-bar">
+      <button class="play-btn" id="edPlay" aria-label="Preview the edit">${ic('play')}</button>
+      <div class="ed-time"><b id="edNow">0:00.0</b><span>Preview skips the parts you remove</span></div>
+      <div class="ed-quick">
+        <button class="chip" data-ed="set-start">${ic('scissors')}Start here</button>
+        <button class="chip" data-ed="set-end">${ic('scissors')}End here</button>
+        <button class="chip" data-ed="cut-here">${ic('x')}Cut 5 s here</button>
+      </div>
+    </div>
+    <div class="ed-summary">
+      <div><b id="sumOrig">–</b><span>Original</span></div>
+      <div><b id="sumNew">–</b><span>New length</span></div>
+      <div><b id="sumCut">–</b><span>Removed</span></div>
+    </div>
+    <section class="ed-sec"><h2>Trim the start and end</h2>
+      <div class="ed-row"><label for="edStartT">Start</label><input type="range" id="edStart" step="0.1" aria-label="Start"><input class="time" id="edStartT" inputmode="decimal" autocomplete="off"></div>
+      <div class="ed-row"><label for="edEndT">End</label><input type="range" id="edEnd" step="0.1" aria-label="End"><input class="time" id="edEndT" inputmode="decimal" autocomplete="off"></div>
+      <div class="chips">${quick('trim-start', 5, 'Remove first 5 s')}${quick('trim-start', 10, 'Remove first 10 s')}${quick('trim-end', 5, 'Remove last 5 s')}${quick('trim-end', 10, 'Remove last 10 s')}${quick('reset', 0, 'Reset')}</div>
+      <p class="hint">Type exact times like 0:10 or 3:50.5, or drag the sliders.</p>
+    </section>
+    <section class="ed-sec"><h2>Cut parts out of the middle</h2>
+      <p class="hint">Each cut removes everything between its two times. Add as many as you need.</p>
+      <div id="cuts"></div>
+      <button class="chip" data-ed="add-cut">${ic('plus')}Add a cut</button>
+    </section>
+    <section class="ed-sec"><h2>Fade</h2>
+      <div class="field"><div class="lbl">Fade in <span id="fiVal">Off</span></div><input type="range" id="edFi" min="0" max="10" step="0.5" value="0" aria-label="Fade in seconds"></div>
+      <div class="field"><div class="lbl">Fade out <span id="foVal">Off</span></div><input type="range" id="edFo" min="0" max="10" step="0.5" value="0" aria-label="Fade out seconds"></div>
+    </section>
+    <section class="ed-sec"><h2>Save</h2>
+      <label class="lbl-plain" for="edTitle">Name of the new song</label>
+      <input class="text-in" id="edTitle" value="${esc(t.title)} (edit)" maxlength="200">
+      <div class="row-btns"><button class="primary-btn" id="edSave">Save as new song</button><button class="ghost-btn" data-ed="cancel">Cancel</button></div>
+      <p class="hint">Your original song stays exactly as it is.</p>
+      <div id="edResult"></div>
+    </section>
+  </div>`;
+}
+
+afterRender.edit = async r => {
+  edCleanup();
+  const box = $('#editor');
+  if (!box) return;
+  const id = box.dataset.id;
+  let t, w;
+  try {
+    t = await api(`/tracks/${encodeURIComponent(id)}/prepare`, { method: 'POST' });
+    w = await api(`/tracks/${encodeURIComponent(id)}/waveform?points=900`);
+  } catch (e) {
+    $('#waveMsg') && ($('#waveMsg').innerHTML = esc(e.message));
+    return;
+  }
+  if (!$('#editor') || $('#editor').dataset.id !== id) return;
+  const dur = w.duration || t.duration || 0;
+  ED = { t, dur, peaks: w.peaks, start: 0, end: dur, cuts: [], fi: 0, fo: 0, audio: new Audio(audioUrl(t)), raf: 0 };
+  ED.audio.preload = 'auto';
+  $('#waveMsg').hidden = true;
+  ['#edStart', '#edEnd'].forEach(s => { $(s).min = 0; $(s).max = dur.toFixed(1); });
+  $('#sumOrig').textContent = fmtPrecise(dur);
+  edRenderCuts(); edSync(); edDraw();
+
+  const a = ED.audio;
+  a.addEventListener('play', () => { setIcon($('#edPlay'), 'pause'); edLoop(); });
+  a.addEventListener('pause', () => { setIcon($('#edPlay'), 'play'); edDraw(); });
+  a.addEventListener('ended', () => { a.currentTime = ED?.start || 0; });
+
+  $('#edPlay').onclick = () => {
+    if (!ED) return;
+    if (a.paused) {
+      if (P.playing) togglePlay();
+      if (a.currentTime < ED.start || a.currentTime >= ED.end - 0.05) a.currentTime = ED.start;
+      a.play().catch(() => toast('Tap play again to preview'));
+    } else a.pause();
+  };
+  const cv = $('#wave');
+  cv.onclick = e => {
+    const rect = cv.getBoundingClientRect();
+    a.currentTime = Math.max(0, Math.min(ED.dur, (e.clientX - rect.left) / rect.width * ED.dur));
+    edDraw(); edShowTime();
+  };
+  addEventListener('resize', edDraw);
+
+  box.addEventListener('input', e => {
+    if (!ED) return;
+    const el = e.target;
+    if (el.id === 'edStart') { ED.start = +el.value; edFix('start'); }
+    else if (el.id === 'edEnd') { ED.end = +el.value; edFix('end'); }
+    else if (el.dataset.cut) { const c = ED.cuts[+el.dataset.ci]; c[el.dataset.cut] = +el.value; edFix(); }
+    else if (el.id === 'edFi') ED.fi = +el.value;
+    else if (el.id === 'edFo') ED.fo = +el.value;
+    else return;
+    edSync(el); edDraw();
+  });
+  box.addEventListener('change', e => {
+    if (!ED) return;
+    const el = e.target;
+    if (!el.classList.contains('time')) return;
+    const v = parseTime(el.value);
+    if (isNaN(v)) {
+      toast('Type a time like 1:05 or 3:50.5', { error: true });
+      const back = el.id === 'edStartT' ? ED.start : el.id === 'edEndT' ? ED.end : ED.cuts[+el.dataset.ci]?.[el.dataset.cutt];
+      el.value = fmtPrecise(back ?? 0);
+      return;
+    }
+    if (el.id === 'edStartT') { ED.start = v; edFix('start'); }
+    else if (el.id === 'edEndT') { ED.end = v; edFix('end'); }
+    else if (el.dataset.cutt) { ED.cuts[+el.dataset.ci][el.dataset.cutt] = v; edFix(); }
+    edSync(); edDraw();
+  });
+  box.addEventListener('click', async e => {
+    const b = e.target.closest('[data-ed]');
+    if (!b || !ED) return;
+    const now = a.currentTime, sec = +b.dataset.sec || 0;
+    switch (b.dataset.ed) {
+      case 'set-start': ED.start = now; edFix('start'); break;
+      case 'set-end': ED.end = now; edFix('end'); break;
+      case 'cut-here': ED.cuts.push({ a: now, b: Math.min(ED.dur, now + 5) }); edFix(); edRenderCuts(); break;
+      case 'trim-start': ED.start = sec; edFix('start'); break;
+      case 'trim-end': ED.end = ED.dur - sec; edFix('end'); break;
+      case 'reset': ED.start = 0; ED.end = ED.dur; ED.cuts = []; ED.fi = ED.fo = 0; $('#edFi').value = 0; $('#edFo').value = 0; edRenderCuts(); break;
+      case 'add-cut': {
+        const mid = Math.min(Math.max(now, ED.start), ED.end - 1);
+        ED.cuts.push({ a: mid, b: Math.min(ED.end, mid + 10) }); edFix(); edRenderCuts(); break;
+      }
+      case 'del-cut': ED.cuts.splice(+b.dataset.ci, 1); edRenderCuts(); break;
+      case 'cancel': history.length > 1 ? history.back() : (location.hash = '#/library'); return;
+    }
+    edSync(); edDraw();
+  });
+  $('#edSave').onclick = edSave;
+};
+
+function edFix(which) {
+  const d = ED.dur;
+  ED.start = Math.max(0, Math.min(ED.start, d - 0.5));
+  ED.end = Math.max(0.5, Math.min(ED.end, d));
+  if (ED.end - ED.start < 0.5) {
+    if (which === 'end') ED.start = Math.max(0, ED.end - 0.5); else ED.end = Math.min(d, ED.start + 0.5);
+  }
+  for (const c of ED.cuts) { c.a = Math.max(0, Math.min(c.a, d)); c.b = Math.max(0, Math.min(c.b, d)); }
+}
+function edRenderCuts() {
+  const box = $('#cuts');
+  if (!box || !ED) return;
+  const max = ED.dur.toFixed(1);
+  box.innerHTML = ED.cuts.length ? ED.cuts.map((c, i) => `<div class="cut">
+      <div class="cut-head"><b>Cut ${i + 1}</b><span data-cutlen="${i}"></span>
+        <button class="icon-btn sm" data-ed="del-cut" data-ci="${i}" aria-label="Remove cut ${i + 1}">${ic('trash')}</button></div>
+      <div class="ed-row"><label>From</label><input type="range" min="0" max="${max}" step="0.1" data-cut="a" data-ci="${i}" aria-label="Cut ${i + 1} from"><input class="time" data-cutt="a" data-ci="${i}" inputmode="decimal" aria-label="Cut ${i + 1} from time"></div>
+      <div class="ed-row"><label>To</label><input type="range" min="0" max="${max}" step="0.1" data-cut="b" data-ci="${i}" aria-label="Cut ${i + 1} to"><input class="time" data-cutt="b" data-ci="${i}" inputmode="decimal" aria-label="Cut ${i + 1} to time"></div>
+    </div>`).join('') : '<p class="hint" style="margin:0 0 12px">No cuts yet.</p>';
+  hydrate(box);
+}
+function edSync(skip) {
+  if (!ED) return;
+  const setR = (el, v) => { if (el && el !== skip) { el.value = v.toFixed(1); el.style.setProperty('--p', (v / ED.dur * 100) + '%'); } };
+  const setT = (el, v) => { if (el && el !== document.activeElement) el.value = fmtPrecise(v); };
+  setR($('#edStart'), ED.start); setT($('#edStartT'), ED.start);
+  setR($('#edEnd'), ED.end); setT($('#edEndT'), ED.end);
+  ED.cuts.forEach((c, i) => {
+    setR($(`[data-cut="a"][data-ci="${i}"]`), c.a); setT($(`[data-cutt="a"][data-ci="${i}"]`), c.a);
+    setR($(`[data-cut="b"][data-ci="${i}"]`), c.b); setT($(`[data-cutt="b"][data-ci="${i}"]`), c.b);
+    const len = Math.abs(c.b - c.a), el = $(`[data-cutlen="${i}"]`);
+    if (el) el.textContent = `removes ${fmtPrecise(len)}`;
+  });
+  $('#fiVal').textContent = ED.fi ? ED.fi + ' s' : 'Off';
+  $('#foVal').textContent = ED.fo ? ED.fo + ' s' : 'Off';
+  ['#edFi', '#edFo'].forEach(s => { const r = $(s); r.style.setProperty('--p', (r.value / 10 * 100) + '%'); });
+  const nl = edNewLength();
+  $('#sumNew').textContent = fmtPrecise(nl);
+  $('#sumCut').textContent = (ED.dur - nl > 0.05 ? '−' : '') + fmtPrecise(ED.dur - nl);
+}
+function edShowTime() { if (ED) $('#edNow').textContent = fmtPrecise(ED.audio.currentTime); }
+function edDraw() {
+  const cv = $('#wave');
+  if (!cv || !ED) return;
+  const dpr = devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const css = getComputedStyle(document.documentElement);
+  const accent = css.getPropertyValue('--accent').trim(), text = css.getPropertyValue('--text').trim(), faint = css.getPropertyValue('--line').trim();
+  const x = t => t / ED.dur * W;
+  const keep = edKeep();
+  const kept = t => keep.some(([a, b]) => t >= a && t < b);
+  const n = ED.peaks.length, bw = W / n;
+  for (let i = 0; i < n; i++) {
+    const t = (i + 0.5) / n * ED.dur, h = Math.max(1.5, ED.peaks[i] * (H - 12));
+    g.fillStyle = kept(t) ? text : faint;
+    g.globalAlpha = kept(t) ? 0.85 : 1;
+    g.fillRect(i * bw, (H - h) / 2, Math.max(1, bw - 0.6), h);
+  }
+  g.globalAlpha = 0.18; g.fillStyle = accent;
+  g.fillRect(0, 0, x(ED.start), H); g.fillRect(x(ED.end), 0, W - x(ED.end), H);
+  for (const [a, b] of edMergedCuts()) g.fillRect(x(a), 0, x(b) - x(a), H);
+  g.globalAlpha = 1; g.fillStyle = accent;
+  g.fillRect(x(ED.start) - 1, 0, 2, H); g.fillRect(x(ED.end) - 1, 0, 2, H);
+  g.fillStyle = text; g.fillRect(x(ED.audio.currentTime) - 1, 0, 2, H);
+}
+function edLoop() {
+  if (!ED) return;
+  const a = ED.audio;
+  if (!a.paused) {
+    const t = a.currentTime;
+    if (t < ED.start - 0.05) a.currentTime = ED.start;
+    else if (t >= ED.end) { a.pause(); a.currentTime = ED.start; }
+    else for (const [x, y] of edMergedCuts()) if (t >= x && t < y - 0.03) { a.currentTime = y; break; }
+    const e = edPosInEdit(a.currentTime), nl = edNewLength();
+    let v = 1;
+    if (ED.fi > 0) v = Math.min(v, e / ED.fi);
+    if (ED.fo > 0) v = Math.min(v, (nl - e) / ED.fo);
+    a.volume = Math.max(0, Math.min(1, v)) * (settings.muted ? 0 : settings.volume);
+  }
+  edShowTime(); edDraw();
+  if (!a.paused) ED.raf = requestAnimationFrame(edLoop);
+}
+async function edSave() {
+  if (!ED) return;
+  if (edNewLength() < 0.5) return toast('Keep at least half a second of the song', { error: true });
+  ED.audio.pause();
+  const btn = $('#edSave'); btn.disabled = true;
+  const tst = toast('<span class="spinner"></span> Saving your edit…', { sticky: true, html: true });
+  try {
+    const nt = await api('/edit/trim', { method: 'POST', body: {
+      track_id: ED.t.id, start: ED.start, end: ED.end, cuts: ED.cuts.map(c => [c.a, c.b]),
+      fade_in: ED.fi, fade_out: ED.fo, title: $('#edTitle').value.trim() || null } });
+    const res = $('#edResult');
+    if (res) { res.innerHTML = resultPanel(nt, 'Edit the new song'); hydrate(res); wireResult(res, nt); res.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+    toast(`Saved “${nt.title}” (${fmtTime(nt.duration)})`);
+  } catch (e) { toast(e.message, { error: true, ms: 8000 }); }
+  finally { tst.remove(); btn.disabled = false; }
+}
+
+/* ---------- combine songs */
+const CB = { list: [], src: 'library', q: '', xf: 0, gap: 0 };
+async function viewCombine(r) {
+  if (!editingAvailable()) return noEditing();
+  const ids = (r.params.get('ids') || '').split(',').filter(Boolean);
+  if (ids.length) {
+    const got = await Promise.all(ids.map(id => api(`/tracks/${encodeURIComponent(id)}`).catch(() => null)));
+    CB.list = got.filter(Boolean);
+    history.replaceState(null, '', '#/combine');
+  }
+  return `<div class="view-head"><div><h1>Combine songs</h1><p class="sub">Join songs one after another to make one new song.</p></div></div>
+  <div class="combine">
+    <section class="ed-sec"><h2>Your new song</h2><div id="cbList"></div><p class="cb-total" id="cbTotal"></p></section>
+    <section class="ed-sec"><h2>Add songs</h2>
+      <div class="toolbar"><div class="search">${ic('search')}<input id="cbSearch" type="search" placeholder="Search songs" aria-label="Search songs to add" value="${esc(CB.q)}"></div>
+      ${IN_APP ? `<div class="chips"><button class="chip ${CB.src === 'library' ? 'on' : ''}" data-cbsrc="library">Library</button><button class="chip ${CB.src === 'phone' ? 'on' : ''}" data-cbsrc="phone">On this phone</button></div>` : ''}</div>
+      <div id="cbResults" class="cb-results"></div></section>
+    <section class="ed-sec"><h2>How to join them</h2>
+      <div class="field"><div class="lbl">Crossfade <span id="cbXfVal"></span></div><input type="range" id="cbXf" min="0" max="10" step="0.5" value="${CB.xf}" aria-label="Crossfade seconds">
+        <p class="hint">Blends the end of each song into the start of the next.</p></div>
+      <div class="field"><div class="lbl">Silence between songs <span id="cbGapVal"></span></div><input type="range" id="cbGap" min="0" max="5" step="0.5" value="${CB.gap}" aria-label="Seconds of silence between songs">
+        <p class="hint">Only used when crossfade is off.</p></div>
+    </section>
+    <section class="ed-sec"><h2>Save</h2>
+      <label class="lbl-plain" for="cbTitle">Name of the new song</label>
+      <input class="text-in" id="cbTitle" maxlength="200" placeholder="Song 1 + Song 2">
+      <div class="row-btns"><button class="primary-btn" id="cbCreate">Create song</button></div>
+      <div id="cbResult"></div>
+    </section>
+  </div>`;
+}
+function cbRender() {
+  const box = $('#cbList');
+  if (!box) return;
+  const L = CB.list;
+  box.innerHTML = L.length ? L.map((t, i) => `<div class="cb-row">
+      <span class="cb-n">${i + 1}</span><div class="thumb">${art(t)}</div>
+      <div class="cb-t"><div class="tt">${esc(t.title)}</div><div class="ta">${esc(t.artist || t.platform || '')}${t.duration ? ', ' + fmtTime(t.duration) : ''}</div></div>
+      <button class="icon-btn sm" data-cb="up" data-i="${i}" aria-label="Move up" ${i === 0 ? 'disabled' : ''}>${ic('up')}</button>
+      <button class="icon-btn sm" data-cb="down" data-i="${i}" aria-label="Move down" ${i === L.length - 1 ? 'disabled' : ''}>${ic('down')}</button>
+      <button class="icon-btn sm" data-cb="remove" data-i="${i}" aria-label="Remove">${ic('x')}</button></div>`).join('')
+    : '<p class="hint" style="margin:0">Add at least two songs below. They play in this order.</p>';
+  hydrate(box);
+  const n = L.length, sum = L.reduce((s, t) => s + (t.duration || 0), 0);
+  const xf = Math.min(CB.xf, n ? Math.min(...L.map(t => t.duration || 999)) / 2 : 0);
+  const total = sum - (CB.xf > 0 ? xf : -CB.gap) * Math.max(0, n - 1);
+  $('#cbTotal').textContent = n ? `${n} song${n === 1 ? '' : 's'}, about ${fmtTime(total)} in total` : '';
+  $('#cbXfVal').textContent = CB.xf ? CB.xf + ' s' : 'Off';
+  $('#cbGapVal').textContent = CB.gap ? CB.gap + ' s' : 'None';
+  $('#cbGap').disabled = CB.xf > 0;
+  ['#cbXf', '#cbGap'].forEach(s => { const r = $(s); r.style.setProperty('--p', (r.value / r.max * 100) + '%'); });
+  const ph = n >= 2 ? L.slice(0, 3).map(t => t.title).join(' + ') + (n > 3 ? ' …' : '') : 'Song 1 + Song 2';
+  $('#cbTitle').placeholder = ph;
+}
+let cbPhoneItems = null;
+async function cbSearch() {
+  const box = $('#cbResults');
+  if (!box) return;
+  const q = CB.q.trim().toLowerCase();
+  let rows;
+  if (CB.src === 'phone') {
+    if (!AKA.hasAudioPermission()) { box.innerHTML = `<p class="hint">Allow access to your phone's music first: open the <a href="#/phone">On this phone</a> tab.</p>`; return; }
+    cbPhoneItems = cbPhoneItems || JSON.parse(AKA.listDeviceAudio() || '[]');
+    rows = cbPhoneItems.filter(it => !q || (it.title + ' ' + it.artist).toLowerCase().includes(q)).slice(0, 60)
+      .map((it, i) => ({ key: 'p' + cbPhoneItems.indexOf(it), title: it.title, sub: [it.artist, it.folder].filter(Boolean).join(', '), duration: it.duration, cover: null }));
+  } else {
+    const tracks = await api(`/tracks?q=${encodeURIComponent(CB.q)}&sort=added`);
+    cbResultsCache = tracks;
+    rows = tracks.slice(0, 60).map((t, i) => ({ key: 'l' + i, title: t.title, sub: t.artist || t.platform || '', duration: t.duration, cover: t.cover }));
+  }
+  box.innerHTML = rows.length ? rows.map(r => `<div class="cb-row"><div class="thumb">${art({ title: r.title, cover: r.cover })}</div>
+      <div class="cb-t"><div class="tt">${esc(r.title)}</div><div class="ta">${esc(r.sub)}${r.duration ? ', ' + fmtTime(r.duration) : ''}</div></div>
+      <button class="chip" data-cbadd="${r.key}">${ic('plus')}Add</button></div>`).join('')
+    : `<p class="hint">${q ? 'No songs match that search.' : 'No songs yet.'}</p>`;
+  hydrate(box);
+}
+let cbResultsCache = [];
+afterRender.combine = () => {
+  const box = $('.combine');
+  if (!box) return;
+  cbRender(); cbSearch();
+  $('#cbSearch').addEventListener('input', debounce(e => { CB.q = e.target.value; cbSearch(); }, 200));
+  box.addEventListener('input', e => {
+    if (e.target.id === 'cbXf') { CB.xf = +e.target.value; cbRender(); }
+    if (e.target.id === 'cbGap') { CB.gap = +e.target.value; cbRender(); }
+  });
+  box.addEventListener('click', async e => {
+    const src = e.target.closest('[data-cbsrc]');
+    if (src) { CB.src = src.dataset.cbsrc; $$('[data-cbsrc]').forEach(b => b.classList.toggle('on', b === src)); return cbSearch(); }
+    const add = e.target.closest('[data-cbadd]');
+    if (add) {
+      const k = add.dataset.cbadd;
+      try {
+        let t;
+        if (k[0] === 'p') {
+          const it = cbPhoneItems[+k.slice(1)];
+          [t] = await api('/device/link', { method: 'POST', body: { items: [{ path: it.path, title: it.title, artist: it.artist, album: it.album, duration: it.duration }] } });
+        } else t = cbResultsCache[+k.slice(1)];
+        CB.list.push(t); cbRender();
+        toast(`Added “${t.title}”`, { ms: 1500 });
+      } catch (err) { toast(err.message, { error: true }); }
+      return;
+    }
+    const b = e.target.closest('[data-cb]');
+    if (!b) return;
+    const i = +b.dataset.i, L = CB.list;
+    if (b.dataset.cb === 'up' && i > 0) [L[i - 1], L[i]] = [L[i], L[i - 1]];
+    if (b.dataset.cb === 'down' && i < L.length - 1) [L[i + 1], L[i]] = [L[i], L[i + 1]];
+    if (b.dataset.cb === 'remove') L.splice(i, 1);
+    cbRender();
+  });
+  $('#cbCreate').onclick = async () => {
+    if (CB.list.length < 2) return toast('Add at least two songs first', { error: true });
+    const btn = $('#cbCreate'); btn.disabled = true;
+    const tst = toast(`<span class="spinner"></span> Combining ${CB.list.length} songs…`, { sticky: true, html: true });
+    try {
+      const nt = await api('/edit/merge', { method: 'POST', body: {
+        track_ids: CB.list.map(t => t.id), crossfade: CB.xf, gap: CB.gap, title: $('#cbTitle').value.trim() || null } });
+      const res = $('#cbResult');
+      if (res) { res.innerHTML = resultPanel(nt, 'Edit or trim it'); hydrate(res); wireResult(res, nt); res.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+      toast(`Created “${nt.title}” (${fmtTime(nt.duration)})`);
+    } catch (err) { toast(err.message, { error: true, ms: 8000 }); }
+    finally { tst.remove(); btn.disabled = false; }
+  };
+};
+
+/* ---------- songs already on the phone */
+const PH = { items: null, q: '', sort: 'added', folder: '', select: false, sel: new Set(), deleting: null };
+function phFiltered() {
+  const q = PH.q.trim().toLowerCase();
+  let L = (PH.items || []).filter(it => (!PH.folder || it.folder === PH.folder) && (!q || `${it.title} ${it.artist} ${it.album} ${it.folder}`.toLowerCase().includes(q)));
+  const by = { added: (a, b) => b.added - a.added, title: (a, b) => a.title.localeCompare(b.title), artist: (a, b) => (a.artist || '~').localeCompare(b.artist || '~'),
+    size: (a, b) => b.size - a.size, duration: (a, b) => b.duration - a.duration }[PH.sort];
+  return by ? L.slice().sort(by) : L;
+}
+async function viewPhone() {
+  if (!IN_APP) return `<div class="empty"><h3>Only in the Android app</h3><p>Install AK Music Player on your phone to see, edit and delete the songs stored there.</p></div>`;
+  if (!AKA.hasAudioPermission()) {
+    PH.items = null;
+    return `<div class="empty"><h3>See the music on your phone</h3>
+      <p>Allow AK Music Player to see your songs and other audio files. They stay where they are and are never uploaded.</p>
+      <button class="primary-btn" data-act="phone-allow">Allow access</button><p class="hint" id="permHelp"></p></div>`;
+  }
+  PH.items = JSON.parse(AKA.listDeviceAudio() || '[]');
+  cbPhoneItems = PH.items;
+  const total = PH.items.reduce((s, it) => s + it.size, 0);
+  const folders = Object.entries(PH.items.reduce((m, it) => (m[it.folder] = (m[it.folder] || 0) + 1, m), {})).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  return `<div class="view-head"><div><h1>On this phone</h1><p class="sub">${PH.items.length} audio file${PH.items.length === 1 ? '' : 's'}, ${fmtBytes(total)}</p></div>
+      <div class="actions"><button class="chip" data-act="ph-play">${ic('play')}Play all</button><button class="chip" data-act="ph-shuffle">${ic('shuffle')}Shuffle</button>
+      <button class="chip" data-act="ph-select">${ic('boxChecked')}Select</button></div></div>
+    ${PH.items.length ? `<div class="toolbar">
+      <div class="search">${ic('search')}<input id="phSearch" type="search" placeholder="Search songs on this phone" value="${esc(PH.q)}" aria-label="Search"></div>
+      <select class="select" id="phSort" aria-label="Sort by">${[['added', 'Newest'], ['title', 'Title'], ['artist', 'Artist'], ['size', 'Biggest files'], ['duration', 'Longest']].map(([v, l]) => `<option value="${v}" ${PH.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      ${folders.length > 1 ? `<div class="chips">${[['', 'All folders'], ...folders.map(([f]) => [f, f])].map(([v, l]) => `<button class="chip ${PH.folder === v ? 'on' : ''}" data-folder="${esc(v)}">${esc(l || 'Other')}</button>`).join('')}</div>` : ''}
+    </div><div id="phList"></div><div class="select-bar" id="phBar" hidden></div>`
+    : `<div class="empty"><h3>No audio files found</h3><p>Songs you download or copy to this phone will show up here.</p></div>`}`;
+}
+function phRender() {
+  const box = $('#phList');
+  if (!box) return;
+  const L = phFiltered();
+  PH.view = L;
+  box.innerHTML = L.length ? `<div class="tracks">${L.slice(0, 1500).map((it, i) => {
+      const on = PH.sel.has(it.id);
+      return `<div class="trow ph-row${on ? ' selected' : ''}" data-pi="${i}">
+        <div class="num"><span>${i + 1}</span></div>
+        <div class="thumb">${PH.select ? `<div class="ph-check">${ic(on ? 'boxChecked' : 'box')}</div>` : genArt(it.title)}</div>
+        <div style="min-width:0"><div class="tt">${esc(it.title)}</div><div class="ta">${esc(it.artist || it.folder || '')}</div></div>
+        <div class="src">${esc(it.folder)}</div><div class="when">${fmtBytes(it.size)}</div><div class="dur">${it.duration ? fmtTime(it.duration) : ''}</div><div></div>
+        <button class="icon-btn sm" data-phmenu="${i}" aria-label="Options for ${esc(it.title)}">${ic('more')}</button></div>`;
+    }).join('')}</div>` : `<div class="empty"><h3>No matches</h3><p>Nothing on this phone matches that search.</p></div>`;
+  hydrate(box);
+  const bar = $('#phBar');
+  if (bar) {
+    bar.hidden = !PH.select;
+    const n = PH.sel.size;
+    bar.innerHTML = `<span><b>${n}</b> selected</span>
+      <button class="chip" data-act="ph-sel-all">Select all</button>
+      <button class="chip" data-act="ph-sel-combine" ${n < 2 ? 'disabled' : ''}>${ic('merge')}Combine</button>
+      <button class="chip" data-act="ph-sel-playlist" ${n < 1 ? 'disabled' : ''}>${ic('plus')}Playlist</button>
+      <button class="chip danger-chip" data-act="ph-sel-delete" ${n < 1 ? 'disabled' : ''}>${ic('trash')}Delete</button>
+      <button class="chip" data-act="ph-select">Done</button>`;
+    hydrate(bar);
+  }
+}
+async function phLink(items) {
+  if (!items.length) return [];
+  const out = [];
+  for (let i = 0; i < items.length; i += 500) {
+    out.push(...await api('/device/link', { method: 'POST', body: { items: items.slice(i, i + 500).map(it => ({ path: it.path, title: it.title, artist: it.artist, album: it.album, duration: it.duration })) } }));
+  }
+  return out;
+}
+async function phPlay(index, shuffle) {
+  const L = PH.view || phFiltered();
+  if (!L.length) return;
+  const tst = L.length > 200 ? toast('<span class="spinner"></span> Getting your songs ready…', { sticky: true, html: true }) : null;
+  try {
+    const tracks = await phLink(L.slice(0, 1500));
+    playList(tracks, shuffle ? Math.floor(Math.random() * tracks.length) : index, { from: 'your phone', shuffle: shuffle ? true : undefined });
+  } catch (e) { toast(e.message, { error: true }); }
+  finally { tst?.remove(); }
+}
+async function phDelete(items) {
+  if (!items.length) return;
+  const one = items.length === 1;
+  const ok = await confirmModal(one ? `Delete “${items[0].title}”?` : `Delete ${items.length} files?`,
+    `${one ? 'This file is' : 'These files are'} deleted from your phone permanently and can't be recovered. Android will ask you to confirm.`, 'Delete');
+  if (!ok) return;
+  PH.deleting = items;
+  try { AKA.deleteDeviceAudio(JSON.stringify(items.map(it => ({ id: it.id, path: it.path })))); }
+  catch (e) { PH.deleting = null; toast(e.message, { error: true }); }
+}
+window.akDeviceDeleted = async (ok, msg) => {
+  const items = PH.deleting || [];
+  PH.deleting = null;
+  if (!ok) { toast(msg && msg !== 'cancelled' ? `Couldn't delete: ${msg}` : 'Nothing was deleted', { error: !!(msg && msg !== 'cancelled') }); return; }
+  try {
+    const r = await api('/device/forget', { method: 'POST', body: { paths: items.map(it => it.path) } });
+    const gone = new Set(r.ids || []);
+    const wasCurrent = current() && gone.has(current().id);
+    for (let i = P.queue.length - 1; i >= 0; i--) if (gone.has(P.queue[i].id) && i !== P.index) removeFromQueue(i);
+    if (wasCurrent) { decks.forEach(d => d.pause()); if (nextIndex(true) !== null) next(true); }
+  } catch { }
+  toast(items.length === 1 ? `Deleted “${items[0].title}”` : `Deleted ${items.length} files`);
+  PH.sel.clear(); PH.select = false; cbPhoneItems = null;
+  route();
+};
+window.akAudioPermission = (granted, canAskAgain) => {
+  if (granted) return route();
+  const help = $('#permHelp');
+  if (help) help.innerHTML = canAskAgain ? 'Access was not allowed. Tap the button to try again.'
+    : 'Access is turned off. Open Android Settings → Permissions → Music and audio, and choose Allow. <br><button class="chip" data-act="phone-settings">Open settings</button>';
+  hydrate(help || document);
+};
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && currentRoute().name === 'phone' && IN_APP && !PH.items && AKA.hasAudioPermission()) route();
+});
+function phMenu(it, anchor) {
+  const one = async () => (await phLink([it]))[0];
+  openMenu([
+    { label: 'Play', icon: 'play', action: async () => { const L = PH.view || []; phPlay(Math.max(0, L.indexOf(it))); } },
+    { label: 'Play next', icon: 'playNext', action: async () => playNextTracks([await one()]) },
+    { label: 'Add to queue', icon: 'queue', action: async () => addToQueue([await one()]) },
+    { label: 'Add to playlist', icon: 'plus', sub: async () => playlistSub([await one()])() },
+    { sep: true },
+    { label: 'Edit / trim', icon: 'scissors', action: async () => { const t = await one(); location.hash = `#/edit/${encodeURIComponent(t.id)}`; } },
+    { label: 'Combine with other songs', icon: 'merge', action: async () => { const t = await one(); location.hash = `#/combine?ids=${encodeURIComponent(t.id)}`; } },
+    { sep: true },
+    { title: `${it.folder || 'Phone'}, ${fmtBytes(it.size)}` },
+    { label: 'Delete from phone', icon: 'trash', danger: true, action: () => phDelete([it]) },
+  ], anchor);
+}
+afterRender.phone = () => {
+  if (!$('#phList')) return;
+  phRender();
+  $('#phSearch').addEventListener('input', debounce(e => { PH.q = e.target.value; phRender(); }, 150));
+  $('#phSort').addEventListener('change', e => { PH.sort = e.target.value; phRender(); });
+  $$('[data-folder]', view).forEach(b => b.addEventListener('click', () => {
+    PH.folder = b.dataset.folder; $$('[data-folder]', view).forEach(x => x.classList.toggle('on', x === b)); phRender();
+  }));
+  $('#phList').addEventListener('click', e => {
+    const m = e.target.closest('[data-phmenu]');
+    const L = PH.view || [];
+    if (m) { e.stopPropagation(); return phMenu(L[+m.dataset.phmenu], m); }
+    const row = e.target.closest('[data-pi]');
+    if (!row) return;
+    const it = L[+row.dataset.pi];
+    if (PH.select) { PH.sel.has(it.id) ? PH.sel.delete(it.id) : PH.sel.add(it.id); phRender(); }
+    else phPlay(+row.dataset.pi);
+  });
+  $('#phList').addEventListener('contextmenu', e => {
+    const row = e.target.closest('[data-pi]');
+    if (!row) return;
+    e.preventDefault(); phMenu((PH.view || [])[+row.dataset.pi], e);
+  });
+};
+async function phoneAct(act, el) {
+  const selected = () => (PH.items || []).filter(it => PH.sel.has(it.id));
+  switch (act) {
+    case 'phone-allow': AKA.requestAudioPermission(); return true;
+    case 'phone-settings': AKA.openAppSettings(); return true;
+    case 'ph-play': phPlay(0); return true;
+    case 'ph-shuffle': phPlay(0, true); return true;
+    case 'ph-select': PH.select = !PH.select; PH.sel.clear(); phRender(); return true;
+    case 'ph-sel-all': (PH.view || []).forEach(it => PH.sel.add(it.id)); phRender(); return true;
+    case 'ph-sel-delete': phDelete(selected()); return true;
+    case 'ph-sel-combine': {
+      const tracks = await phLink(selected());
+      CB.list = tracks; location.hash = '#/combine'; return true;
+    }
+    case 'ph-sel-playlist': {
+      const tracks = await phLink(selected());
+      openMenu([{ title: `Add ${tracks.length} song${tracks.length === 1 ? '' : 's'} to` }, ...playlistSub(tracks)()], el); return true;
+    }
+  }
+  return false;
+}
+
 const SITES = [['instagram', 'Instagram'], ['facebook', 'Facebook'], ['x', 'X (Twitter)']];
 function accountsHTML() {
   let st = {};
@@ -1373,6 +1986,7 @@ afterRender.settings = () => {
 
 /* ---------- view click handling */
 async function handleAct(act, el) {
+  if (act.startsWith('ph') && await phoneAct(act, el)) return;
   const r = currentRoute();
   const listKey = $('.tracks', view)?.dataset.key;
   const tracks = listKey ? lists[listKey].tracks : [];

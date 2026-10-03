@@ -2,7 +2,7 @@
 
 # AK Music Player
 
-Paste any link from YouTube, Instagram, SoundCloud, TikTok and 1,000+ other sites, and play just the music. No ads, no account, no subscription. Build playlists, read synced lyrics, and download songs as MP3.
+Paste or share any link from YouTube, Instagram, Spotify, Apple Music, Amazon Music, JioSaavn and 1,000+ other sites, and play just the music. No ads, no account, no subscription. Build playlists, read synced lyrics, download songs as MP3, trim and combine songs, and manage the music already on your phone.
 
 Everything runs on your phone. Install the app and start playing: no computer and no extra apps needed.
 
@@ -33,7 +33,11 @@ Everything runs on your phone. Install the app and start playing: no computer an
 ## How to use it
 
 - **Play a link:** copy a link in YouTube, Instagram or any other app, then paste it into the bar at the top and tap **Play**.
-- **Share to the app:** in YouTube or Instagram tap **Share → AK Music Player**. It starts playing straight away.
+- **Share to the app:** in YouTube, Instagram, Spotify or any music app tap **Share → AK Music Player**. It starts playing straight away.
+- **Spotify, Apple Music, Amazon Music and others:** these apps lock their audio, so AK Music Player reads the song's name, artist and length from the link and plays the same song from YouTube, keeping the original title and artwork. Playlists and albums import as AK Music Player playlists.
+- **Trim a song:** tap **⋯ → Edit / trim song**. Drag the sliders or type exact times (for example start at 0:10 to turn a 4:00 song into 3:50), add cuts to remove parts from the middle, add fades, preview, then **Save as new song**. Your original stays untouched.
+- **Combine songs:** **Library → Combine songs** (or **⋯ → Combine with other songs**). Add songs, put them in order, choose a crossfade or a gap, and create one new song.
+- **Songs on your phone:** the **Phone** tab shows every song and audio file stored on the phone. Play them, add them to playlists, trim or combine them, or delete them permanently (tap **Select** to delete many at once; Android asks you to confirm).
 - **Playlists:** tap **⋯** on any song → **Add to playlist**. Paste a YouTube or SoundCloud *playlist* link to import the whole thing.
 - **Download:** tap **⋯** → **Download** and choose MP3, M4A or FLAC. Files go to **Downloads/AK Music Player**.
 - **Instagram posts that won't play:** open **Settings → Accounts** and sign in to Instagram once. Your login stays on your phone.
@@ -42,7 +46,11 @@ Everything runs on your phone. Install the app and start playing: no computer an
 
 | Area | What you can do |
 |---|---|
-| **Play from links** | YouTube, YouTube Music, Instagram reels, SoundCloud, TikTok, Vimeo, Bandcamp, Facebook, X and 1,000+ more |
+| **Play from links** | YouTube, YouTube Music, Instagram reels, JioSaavn, SoundCloud, TikTok, Vimeo, Bandcamp, Facebook, X and 1,000+ more |
+| **Music apps** | Spotify, Apple Music, Amazon Music, Deezer, Tidal, Gaana, Wynk, Hungama, Resso, Boomplay, Anghami, Shazam, Pandora, Napster, Qobuz, Yandex Music and song.link: songs, albums and public playlists, matched to the same song on YouTube |
+| **Song editor** *(new in 2.0)* | Trim the start and end with sliders or exact times, cut any number of parts out of the middle, fade in/out, see exactly how much is removed, preview, save as a new song |
+| **Combine songs** *(new in 2.0)* | Join up to 30 songs into one, in any order, with a crossfade or a gap between them |
+| **On this phone** *(new in 2.0)* | See every song and audio file on the phone, search and sort them by folder, size or length, play, edit, add to playlists, and delete permanently |
 | **Share to play** | Share a link from any app straight to AK Music Player |
 | **Playlists** | Create, rename, pin, duplicate, reorder; import whole YouTube and SoundCloud playlists |
 | **Player** | Shuffle, repeat one / all, crossfade (0–12 s), speed 0.5×–2×, sleep timer with fade-out |
@@ -60,6 +68,12 @@ Everything runs on your phone. Install the app and start playing: no computer an
 
 **A link says "needs you to be signed in"**
 Go to **Settings → Accounts** and sign in to that site (Instagram, Facebook or X), then try the link again.
+
+**A Spotify / Apple Music song plays the wrong version**
+The app picks the closest match on YouTube by name and length. If it's wrong, tap **⋯ → Edit details**, correct the title or artist, delete the song, and share the link again; or paste the YouTube link of the version you want.
+
+**A Spotify playlist won't import**
+Only public playlists can be read. In Spotify, make the playlist public, or share the songs one by one.
 
 **A YouTube or Instagram link stopped working**
 Sites change often. The app updates its downloader by itself once a day: close the app completely (swipe it away), wait a minute, and open it again. If it still fails, install the newest APK from the releases page.
@@ -99,6 +113,7 @@ The same player runs in a browser on Windows, macOS or Linux. Install Python, [F
 android/   the app: Java (no extra libraries) — player screen, notification controls, downloads, sign-in
   └─ python/akserver.py   starts the built-in music engine inside the app
 backend/   the music engine: Python, FastAPI, yt-dlp, SQLite
+  └─ musiclinks.py        reads Spotify / Apple Music / Amazon Music / … links
 frontend/  the player interface: HTML, CSS, JavaScript
 ```
 
@@ -112,4 +127,4 @@ AK Music Player is a personal tool. Only download what you have the right to sav
 
 Made by **AJAIKRISHNA**. © 2026 AJAIKRISHNA. All rights reserved.
 
-Built with [Chaquopy](https://chaquo.com/chaquopy/) (MIT), [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense), [FFmpeg](https://ffmpeg.org) static builds by John Van Sickle via [ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) (GPL), [QuickJS-ng](https://github.com/quickjs-ng/quickjs) (MIT), [FastAPI](https://fastapi.tiangolo.com) (MIT), and lyrics from [LRCLIB](https://lrclib.net). Notification icons from Google's Material Icons (Apache 2.0).
+Built with [Chaquopy](https://chaquo.com/chaquopy/) (MIT), [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense), [FFmpeg](https://ffmpeg.org) static builds by John Van Sickle via [ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) (GPL), [QuickJS-ng](https://github.com/quickjs-ng/quickjs) (MIT), [FastAPI](https://fastapi.tiangolo.com) (MIT), lyrics from [LRCLIB](https://lrclib.net), and song matching help from [Odesli / song.link](https://odesli.co), Apple's iTunes Search API and Deezer's public API. Notification icons from Google's Material Icons (Apache 2.0).

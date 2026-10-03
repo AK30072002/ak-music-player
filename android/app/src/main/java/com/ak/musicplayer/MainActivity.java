@@ -2,6 +2,8 @@ package com.ak.musicplayer;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.PendingIntent;
+import android.app.RecoverableSecurityException;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -11,6 +13,8 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.MediaStore;
+import android.provider.Settings;
 import android.view.View;
 import android.view.Window;
 import android.webkit.CookieManager;
@@ -26,10 +30,13 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.lang.ref.WeakReference;
 import java.net.URLEncoder;
+import java.io.File;
+import java.util.ArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,13 +49,16 @@ import java.util.regex.Pattern;
  */
 public class MainActivity extends Activity {
 
-    public static final String VERSION = "1.0.0";
+    public static final String VERSION = "2.0.0";
     static final String LOADING_URL = "file:///android_asset/loading.html";
 
     private static final int REQ_FILE = 11;
     private static final int REQ_NOTIFY = 12;
     private static final int REQ_STORAGE = 14;
     private static final int REQ_LOGIN = 15;
+    private static final int REQ_AUDIO = 16;
+    private static final int REQ_DELETE = 17;
+    private static final int REQ_STORAGE_DELETE = 18;
     private static final Pattern URL_RE = Pattern.compile("https?://\\S+");
 
     static WeakReference<MainActivity> current = new WeakReference<>(null);
@@ -61,6 +71,8 @@ public class MainActivity extends Activity {
     private volatile boolean starting;
     private volatile String engineError = "";
     private String pendingDownloadUrl, pendingDownloadName;
+    private JSONArray pendingDelete;       // phone files waiting for the user's delete confirmation
+    private int deleteIndex;                // Android 10: files are confirmed one at a time
 
     // ------------------------------------------------------------------ lifecycle
     @Override
@@ -239,6 +251,16 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
         boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
+        if (requestCode == REQ_AUDIO) {
+            boolean canAskAgain = shouldShowRequestPermissionRationale(DeviceAudio.permission());
+            runJs("window.akAudioPermission && window.akAudioPermission(" + granted + "," + canAskAgain + ")");
+            return;
+        }
+        if (requestCode == REQ_STORAGE_DELETE) {
+            if (granted && pendingDelete != null) deleteDirect();
+            else finishDelete(false, "Allow storage access to delete files");
+            return;
+        }
         if (requestCode == REQ_STORAGE) {
             if (granted && pendingDownloadUrl != null) download(pendingDownloadUrl, pendingDownloadName);
             else if (!granted) Toast.makeText(this, "Allow storage access to save downloads", Toast.LENGTH_LONG).show();
@@ -246,9 +268,79 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ------------------------------------------------------------------ deleting songs from the phone
+    /** items: JSON array of {id, path}. The user always confirms; deleted files are gone for good. */
+    void deleteDeviceAudio(String json) {
+        try {
+            pendingDelete = new JSONArray(json);
+            deleteIndex = 0;
+            if (pendingDelete.length() == 0) {
+                finishDelete(false, "nothing selected");
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= 30) {
+                ArrayList<Uri> uris = new ArrayList<>();
+                for (int i = 0; i < pendingDelete.length(); i++) {
+                    uris.add(DeviceAudio.uriFor(pendingDelete.getJSONObject(i).getLong("id")));
+                }
+                PendingIntent pi = MediaStore.createDeleteRequest(getContentResolver(), uris);
+                startIntentSenderForResult(pi.getIntentSender(), REQ_DELETE, null, 0, 0, 0);
+                return;
+            }
+            if (Build.VERSION.SDK_INT < 29
+                    && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE_DELETE);
+                return;
+            }
+            deleteDirect();
+        } catch (Exception e) {
+            finishDelete(false, e.getMessage());
+        }
+    }
+
+    /** Android 10 and older: delete through the media library, one file at a time. */
+    private void deleteDirect() {
+        try {
+            while (pendingDelete != null && deleteIndex < pendingDelete.length()) {
+                JSONObject item = pendingDelete.getJSONObject(deleteIndex);
+                Uri uri = DeviceAudio.uriFor(item.getLong("id"));
+                try {
+                    getContentResolver().delete(uri, null, null);
+                } catch (SecurityException se) {
+                    if (Build.VERSION.SDK_INT == 29 && se instanceof RecoverableSecurityException) {
+                        startIntentSenderForResult(((RecoverableSecurityException) se).getUserAction()
+                                .getActionIntent().getIntentSender(), REQ_DELETE, null, 0, 0, 0);
+                        return;    // continues in onActivityResult
+                    }
+                    throw se;
+                }
+                File f = new File(item.optString("path", ""));
+                if (Build.VERSION.SDK_INT < 29 && f.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    f.delete();
+                }
+                deleteIndex++;
+            }
+            finishDelete(true, "");
+        } catch (Exception e) {
+            finishDelete(deleteIndex > 0, e.getMessage());
+        }
+    }
+
+    private void finishDelete(boolean ok, String message) {
+        pendingDelete = null;
+        runJs("window.akDeviceDeleted && window.akDeviceDeleted(" + ok + "," + JSONObject.quote(message == null ? "" : message) + ")");
+    }
+
     // ------------------------------------------------------------------ file picker (upload songs, restore backup)
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQ_DELETE) {
+            if (resultCode != RESULT_OK) finishDelete(false, "cancelled");
+            else if (Build.VERSION.SDK_INT >= 30) finishDelete(true, "");
+            else deleteDirect();                       // Android 10: permission granted for this file, continue
+            return;
+        }
         if (requestCode == REQ_LOGIN) {
             runJs("window.akAccountsChanged && window.akAccountsChanged()");
             return;
@@ -380,6 +472,48 @@ public class MainActivity extends Activity {
                     Intent i = new Intent(MainActivity.this, LoginActivity.class);
                     i.putExtra(LoginActivity.EXTRA_SITE, site);
                     startActivityForResult(i, REQ_LOGIN);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public boolean hasAudioPermission() {
+            return DeviceAudio.hasPermission(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void requestAudioPermission() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    requestPermissions(new String[]{DeviceAudio.permission()}, REQ_AUDIO);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public String listDeviceAudio() {
+            return DeviceAudio.hasPermission(MainActivity.this) ? DeviceAudio.list(MainActivity.this) : "[]";
+        }
+
+        @JavascriptInterface
+        public void deleteDeviceAudio(final String json) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    MainActivity.this.deleteDeviceAudio(json);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void openAppSettings() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", getPackageName(), null));
+                    startActivity(i);
                 }
             });
         }
