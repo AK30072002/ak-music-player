@@ -20,7 +20,7 @@ android {
         minSdk 26          // Android 8.0+
         targetSdk 34
         versionCode Integer.parseInt(env.get('AK_VERSION_CODE') ?: '1')
-        versionName env.get('AK_VERSION_NAME') ?: '2.0.1'
+        versionName env.get('AK_VERSION_NAME') ?: '2.1.0'
         ndk {
             abiFilters abi
         }

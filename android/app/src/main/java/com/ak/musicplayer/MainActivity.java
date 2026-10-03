@@ -49,7 +49,7 @@ import java.util.regex.Pattern;
  */
 public class MainActivity extends Activity {
 
-    public static final String VERSION = "2.0.1";
+    public static final String VERSION = "2.1.0";
     static final String LOADING_URL = "file:///android_asset/loading.html";
 
     private static final int REQ_FILE = 11;
@@ -487,6 +487,18 @@ public class MainActivity extends Activity {
                     Intent i = new Intent(MainActivity.this, LoginActivity.class);
                     i.putExtra(LoginActivity.EXTRA_SITE, site);
                     startActivityForResult(i, REQ_LOGIN);
+                }
+            });
+        }
+
+        /** The built-in editor (Android's own decoders/encoders), used when FFmpeg can't run. */
+        @JavascriptInterface
+        public void editAudio(final String jobId, String json) {
+            AudioEditor.run(json, new AudioEditor.Callback() {
+                @Override
+                public void done(boolean ok, String payload) {
+                    runJs("window.akEditDone && window.akEditDone(" + JSONObject.quote(jobId) + "," + ok + ","
+                            + JSONObject.quote(payload) + ")");
                 }
             });
         }

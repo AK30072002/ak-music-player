@@ -69,6 +69,9 @@ Everything runs on your phone. Install the app and start playing: no computer an
 **A link says "needs you to be signed in"**
 Go to **Settings → Accounts** and sign in to that site (Instagram, Facebook or X), then try the link again.
 
+**Editing or MP3 downloads on some phones**
+On some phones Android doesn't allow the bundled FFmpeg program to run. The app then edits and combines songs with Android's own built-in audio tools instead (saved as high-quality M4A), and downloads keep the original quality, because Android has no built-in MP3 encoder. **Settings → Music engine** shows which one your phone uses and why.
+
 **A Spotify / Apple Music song plays the wrong version**
 The app picks the closest match on YouTube by name and length. If it's wrong, tap **⋯ → Edit details**, correct the title or artist, delete the song, and share the link again; or paste the YouTube link of the version you want.
 
@@ -117,7 +120,7 @@ backend/   the music engine: Python, FastAPI, yt-dlp, SQLite
 frontend/  the player interface: HTML, CSS, JavaScript
 ```
 
-Inside the APK, [Chaquopy](https://chaquo.com/chaquopy/) runs Python, which serves the player on the phone itself (127.0.0.1). [yt-dlp](https://github.com/yt-dlp/yt-dlp) fetches just the audio, [FFmpeg](https://ffmpeg.org) converts downloads, and [QuickJS](https://github.com/quickjs-ng/quickjs) solves YouTube's playback checks. Your library is stored only on your phone.
+Inside the APK, [Chaquopy](https://chaquo.com/chaquopy/) runs Python, which serves the player on the phone itself (127.0.0.1). [yt-dlp](https://github.com/yt-dlp/yt-dlp) fetches just the audio, [FFmpeg](https://ffmpeg.org) converts downloads and edits songs, and [QuickJS](https://github.com/quickjs-ng/quickjs) solves YouTube's playback checks. If a phone won't run FFmpeg, editing switches to `AudioEditor.java`, which uses Android's own MediaCodec decoders and AAC encoder. Your library is stored only on your phone.
 
 ## Fair use
 

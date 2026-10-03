@@ -6,6 +6,7 @@ The server, the web player and its tools all live in the APK:
   - ffmpeg and qjs (QuickJS, used by yt-dlp for YouTube) are packaged as native
     libraries and symlinked into <files>/bin by ServerManager.java
 """
+import json
 import os
 import socket
 import subprocess
@@ -24,10 +25,17 @@ _error = ""
 
 
 def _works(cmd):
+    """(ok, reason) for running a bundled tool once."""
     try:
-        return subprocess.run(cmd, capture_output=True, timeout=20).returncode == 0
-    except Exception:
-        return False
+        r = subprocess.run(cmd, capture_output=True, timeout=20)
+    except Exception as e:
+        return False, str(e)[:200]
+    if r.returncode == 0:
+        return True, ""
+    if r.returncode < 0:
+        return False, f"stopped by Android (signal {-r.returncode})"
+    err = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+    return False, f"exit code {r.returncode}" + (f": {err[-1][:160]}" if err else "")
 
 
 def _check_tools(bin_dir):
@@ -35,10 +43,13 @@ def _check_tools(bin_dir):
     status = {}
     for name, test in (("ffmpeg", ["-hide_banner", "-version"]), ("qjs", ["-e", "1"])):
         path = os.path.join(bin_dir, name)
-        ok = os.path.exists(path) and _works([path] + test)
+        if not os.path.exists(path):
+            ok, why = False, "not included in this app build"
+        else:
+            ok, why = _works([path] + test)
         if not ok and os.path.lexists(path):
             os.remove(path)
-        status[name] = ok
+        status[name] = {"ok": ok, "error": why}
     return status
 
 
@@ -147,10 +158,14 @@ def start(files_dir, cache_dir, bin_dir, preferred_port=8765):
         "XDG_CACHE_HOME": cache_dir,
         "HOME": files_dir,
         "PATH": bin_dir + os.pathsep + os.environ.get("PATH", "/system/bin"),
+        # FFmpeg is a standard Linux program; Android's security filter can block a startup
+        # feature newer Linux programs use ("rseq"). Turning it off lets FFmpeg run on more phones.
+        "GLIBC_TUNABLES": "glibc.pthread.rseq=0",
     })
     tempfile.tempdir = cache_dir
     tools = _check_tools(bin_dir)
-    print(f"AK Music Player: ffmpeg={'yes' if tools['ffmpeg'] else 'no'} quickjs={'yes' if tools['qjs'] else 'no'}",
+    os.environ["AK_TOOLS"] = json.dumps(tools)
+    print("AK Music Player tools: " + ", ".join(f"{k}={'ok' if v['ok'] else v['error']}" for k, v in tools.items()),
           file=sys.stderr)
 
     try:

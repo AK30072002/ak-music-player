@@ -1330,7 +1330,26 @@ const fmtPrecise = sec => {
   const m = Math.floor(sec / 60), r = sec - m * 60;
   return `${m}:${r.toFixed(1).padStart(4, '0')}`;
 };
-const editingAvailable = () => !(S.health && S.health.editing === false);
+// FFmpeg (in the engine) does the editing when it can run on the phone; otherwise the app's
+// built-in editor uses Android's own audio decoders and encoder (AudioEditor.java).
+const nativeEditing = () => IN_APP && typeof AKA.editAudio === 'function' && !!S.health && S.health.editing === false;
+const editingAvailable = () => !(S.health && S.health.editing === false) || nativeEditing();
+const nativeJobs = {};
+function nativeJob(job) {
+  return new Promise((resolve, reject) => {
+    const id = 'j' + Date.now() + Math.random().toString(36).slice(2, 7);
+    nativeJobs[id] = { resolve, reject };
+    try { AKA.editAudio(id, JSON.stringify(job)); } catch (e) { delete nativeJobs[id]; reject(e); }
+  });
+}
+window.akEditDone = (id, ok, payload) => {
+  const j = nativeJobs[id];
+  if (!j) return;
+  delete nativeJobs[id];
+  if (ok) { try { j.resolve(JSON.parse(payload)); } catch (e) { j.reject(e); } }
+  else j.reject(new Error(payload));
+};
+async function ensureHealth() { if (!S.health) S.health = await api('/health').catch(() => null); }
 const noEditing = () => `<div class="empty"><h3>Editing isn't available here</h3><p>Editing needs FFmpeg, which couldn't run on this device. Playing and downloading still work.</p></div>`;
 function resultPanel(t, again) {
   const fmt = (S.health?.formats || []).includes('mp3') ? 'mp3' : 'original';
@@ -1376,6 +1395,7 @@ function edPosInEdit(t) {
 }
 
 async function viewEdit(r) {
+  await ensureHealth();
   if (!editingAvailable()) return noEditing();
   const t = await api(`/tracks/${r.id}`);
   const quick = (k, s, l) => `<button class="chip" data-ed="${k}" data-sec="${s}">${l}</button>`;
@@ -1430,7 +1450,10 @@ afterRender.edit = async r => {
   let t, w;
   try {
     t = await api(`/tracks/${encodeURIComponent(id)}/prepare`, { method: 'POST' });
-    w = await api(`/tracks/${encodeURIComponent(id)}/waveform?points=900`);
+    if (nativeEditing()) {
+      const src = await api(`/tracks/${encodeURIComponent(id)}/source`);
+      w = await nativeJob({ op: 'waveform', src: src.path, points: 900 });
+    } else w = await api(`/tracks/${encodeURIComponent(id)}/waveform?points=900`);
   } catch (e) {
     $('#waveMsg') && ($('#waveMsg').innerHTML = esc(e.message));
     return;
@@ -1607,9 +1630,14 @@ async function edSave() {
   const btn = $('#edSave'); btn.disabled = true;
   const tst = toast('<span class="spinner"></span> Saving your edit…', { sticky: true, html: true });
   try {
-    const nt = await api('/edit/trim', { method: 'POST', body: {
-      track_id: ED.t.id, start: ED.start, end: ED.end, cuts: ED.cuts.map(c => [c.a, c.b]),
-      fade_in: ED.fi, fade_out: ED.fo, title: $('#edTitle').value.trim() || null } });
+    const body = { track_id: ED.t.id, start: ED.start, end: ED.end, cuts: ED.cuts.map(c => [c.a, c.b]),
+      fade_in: ED.fi, fade_out: ED.fo, title: $('#edTitle').value.trim() || null, duration: ED.dur };
+    let nt;
+    if (nativeEditing()) {
+      const plan = await api('/edit/plan-trim', { method: 'POST', body });
+      const res = await nativeJob({ op: 'trim', src: plan.src, keep: plan.keep, fadeIn: plan.fade_in, fadeOut: plan.fade_out, out: plan.out });
+      nt = await api('/edit/finish', { method: 'POST', body: { id: plan.id, duration: res.duration } });
+    } else nt = await api('/edit/trim', { method: 'POST', body });
     const res = $('#edResult');
     if (res) { res.innerHTML = resultPanel(nt, 'Edit the new song'); hydrate(res); wireResult(res, nt); res.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
     toast(`Saved “${nt.title}” (${fmtTime(nt.duration)})`);
@@ -1620,6 +1648,7 @@ async function edSave() {
 /* ---------- combine songs */
 const CB = { list: [], src: 'library', q: '', xf: 0, gap: 0 };
 async function viewCombine(r) {
+  await ensureHealth();
   if (!editingAvailable()) return noEditing();
   const ids = (r.params.get('ids') || '').split(',').filter(Boolean);
   if (ids.length) {
@@ -1733,8 +1762,13 @@ afterRender.combine = () => {
     const btn = $('#cbCreate'); btn.disabled = true;
     const tst = toast(`<span class="spinner"></span> Combining ${CB.list.length} songs…`, { sticky: true, html: true });
     try {
-      const nt = await api('/edit/merge', { method: 'POST', body: {
-        track_ids: CB.list.map(t => t.id), crossfade: CB.xf, gap: CB.gap, title: $('#cbTitle').value.trim() || null } });
+      const body = { track_ids: CB.list.map(t => t.id), crossfade: CB.xf, gap: CB.gap, title: $('#cbTitle').value.trim() || null };
+      let nt;
+      if (nativeEditing()) {
+        const plan = await api('/edit/plan-merge', { method: 'POST', body });
+        const res = await nativeJob({ op: 'merge', srcs: plan.srcs, crossfade: plan.crossfade, gap: plan.gap, out: plan.out });
+        nt = await api('/edit/finish', { method: 'POST', body: { id: plan.id, duration: res.duration } });
+      } else nt = await api('/edit/merge', { method: 'POST', body });
       const res = $('#cbResult');
       if (res) { res.innerHTML = resultPanel(nt, 'Edit or trim it'); hydrate(res); wireResult(res, nt); res.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
       toast(`Created “${nt.title}” (${fmtTime(nt.duration)})`);
@@ -1957,7 +1991,9 @@ async function viewSettings() {
       <span><kbd>M</kbd></span><span>Mute</span><span><kbd>F</kbd></span><span>Full-screen player</span>
       <span><kbd>Q</kbd></span><span>Queue</span><span><kbd>/</kbd></span><span>Paste a link</span>
       <span><kbd>Ctrl</kbd>+<kbd>V</kbd></span><span>Play a copied link from anywhere</span></div></section>
-    <section><h2>${IN_APP ? 'Music engine' : 'Server'}</h2><p>${health ? `Version ${esc(health.version)}. yt-dlp ${esc(health.yt_dlp)}. FFmpeg ${health.ffmpeg ? 'installed' : IN_APP ? 'unavailable on this phone, so downloads keep the original quality' : '<b style="color:var(--danger)">not found</b> — install it to download MP3/FLAC'}. ${IN_APP ? `YouTube helper ${health.js_runtime ? 'ready' : '<b style="color:var(--danger)">unavailable</b> (some YouTube videos may not play)'}.` : `Login cookies ${health.cookies ? 'configured' : 'not set (needed for some Instagram posts)'}.`}` : "Can't reach the server."}</p></section>
+    <section><h2>${IN_APP ? 'Music engine' : 'Server'}</h2><p>${health ? `Version ${esc(health.version)}. yt-dlp ${esc(health.yt_dlp)}. FFmpeg ${health.ffmpeg ? 'installed' : IN_APP
+  ? `couldn't run on this phone${health.tools?.ffmpeg?.error ? ' (' + esc(health.tools.ffmpeg.error) + ')' : ''}, so editing uses Android's built-in audio tools and downloads keep the original quality`
+  : '<b style="color:var(--danger)">not found</b> — install it to download MP3/FLAC'}. ${IN_APP ? `YouTube helper ${health.js_runtime ? 'ready' : '<b style="color:var(--danger)">unavailable</b> (some YouTube videos may not play)'}.` : `Login cookies ${health.cookies ? 'configured' : 'not set (needed for some Instagram posts)'}.`}` : "Can't reach the server."}</p></section>
   </div>`;
 }
 afterRender.settings = () => {

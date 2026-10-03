@@ -53,7 +53,7 @@ MP3_BITRATE = os.environ.get("AK_MP3_BITRATE", "320k")
 ON_ANDROID = os.environ.get("AK_PLATFORM") == "android"   # running inside the Android app
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 HAS_FFPROBE = shutil.which("ffprobe") is not None
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.1.0"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 
 AUDIO_TYPES = {
@@ -553,7 +553,8 @@ class TrackIds(BaseModel):
 def health():
     return {"ok": True, "app": "ak-music-player", "version": APP_VERSION, "ffmpeg": HAS_FFMPEG,
             "android": ON_ANDROID, "formats": ["mp3", "m4a", "flac", "original"] if HAS_FFMPEG else ["original"],
-            "editing": HAS_FFMPEG, "yt_dlp": yt_dlp.version.__version__, "js_runtime": next(iter(JS_RUNTIMES), None),
+            "editing": HAS_FFMPEG, "tools": json.loads(os.environ.get("AK_TOOLS", "{}")),
+            "yt_dlp": yt_dlp.version.__version__, "js_runtime": next(iter(JS_RUNTIMES), None),
             "cookies": bool(COOKIES_BROWSER or (COOKIES_FILE and Path(COOKIES_FILE).exists()))}
 
 
@@ -1015,6 +1016,7 @@ class TrimIn(BaseModel):
     fade_in: float = 0
     fade_out: float = 0
     title: Optional[str] = None
+    duration: Optional[float] = None   # length measured by the phone, if the server couldn't read it
 
 
 def keep_segments(duration: float, start: float, end: Optional[float], cuts: list) -> list[tuple[float, float]]:
@@ -1045,8 +1047,8 @@ def keep_segments(duration: float, start: float, end: Optional[float], cuts: lis
 
 
 def _save_new_track(tid: str, out: Path, title: str, artist: str, album: str, platform: str,
-                    source: str, cover_from: Optional[str] = None) -> dict:
-    duration = probe_duration(out)
+                    source: str, cover_from: Optional[str] = None, duration: Optional[float] = None) -> dict:
+    duration = probe_duration(out) or duration
     with db() as con:
         con.execute("""INSERT INTO tracks (id, source_url, platform, title, artist, album, duration, status, file, added_at)
                        VALUES (?,?,?,?,?,?,?,'ready',?,?)""",
@@ -1064,21 +1066,28 @@ def _run_ffmpeg(cmd: list[str]):
         raise HTTPException(500, "Editing failed: " + (r.stderr.strip().splitlines() or ["unknown error"])[-1][:300])
 
 
-@app.post("/api/edit/trim")
-def edit_trim(body: TrimIn):
-    """Trim the start/end and cut parts out of the middle. Saves a NEW song; the original is untouched."""
-    _need_ffmpeg()
+def _trim_plan(body: "TrimIn") -> dict:
     with db() as con:
         t = con.execute("SELECT * FROM tracks WHERE id=?", (body.track_id,)).fetchone()
     if not t:
         raise HTTPException(404, "Track not found")
     src = ensure_audio(t["id"])
-    dur = _duration_of(t, src)
-    keep = keep_segments(dur, body.start, body.end, body.cuts)
+    dur = t["duration"] or body.duration or probe_duration(src)
+    if not dur:
+        raise HTTPException(422, "Couldn't read the length of this song")
+    keep = keep_segments(float(dur), body.start, body.end, body.cuts)
     total = sum(b - a for a, b in keep)
-    fi = max(0.0, min(float(body.fade_in), total / 2))
-    fo = max(0.0, min(float(body.fade_out), total / 2))
+    return {"t": t, "src": src, "keep": keep, "total": total,
+            "fi": max(0.0, min(float(body.fade_in), total / 2)), "fo": max(0.0, min(float(body.fade_out), total / 2)),
+            "title": (body.title or f"{t['title']} (edit)").strip()[:200]}
 
+
+@app.post("/api/edit/trim")
+def edit_trim(body: TrimIn):
+    """Trim the start/end and cut parts out of the middle. Saves a NEW song; the original is untouched."""
+    _need_ffmpeg()
+    p = _trim_plan(body)
+    t, src, keep, total, fi, fo, title = p["t"], p["src"], p["keep"], p["total"], p["fi"], p["fo"], p["title"]
     n = len(keep)
     parts, labels = [f"[0:a]asplit={n}" + "".join(f"[s{i}]" for i in range(n))], []
     for i, (a, b) in enumerate(keep):
@@ -1098,8 +1107,6 @@ def edit_trim(body: TrimIn):
     if fo > 0:
         chain += f",afade=t=out:st={total - fo:.3f}:d={fo:.3f}"
     parts.append(chain + "[out]")
-
-    title = (body.title or f"{t['title']} (edit)").strip()[:200]
     tid = f"edit-{uuid.uuid4().hex[:12]}"
     out = AUDIO_DIR / f"{tid}.m4a"
     _run_ffmpeg(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-filter_complex", ";".join(parts),
@@ -1116,10 +1123,7 @@ class MergeIn(BaseModel):
     title: Optional[str] = None
 
 
-@app.post("/api/edit/merge")
-def edit_merge(body: MergeIn):
-    """Join songs one after another into a NEW song."""
-    _need_ffmpeg()
+def _merge_plan(body: MergeIn) -> dict:
     if len(body.track_ids) < 2:
         raise HTTPException(400, "Choose at least two songs to combine")
     if len(body.track_ids) > 30:
@@ -1133,14 +1137,31 @@ def edit_merge(body: MergeIn):
         p = ensure_audio(tid)
         rows.append(t)
         paths.append(p)
-        durs.append(_duration_of(t, p))
-    n = len(paths)
-    xf = max(0.0, min(float(body.crossfade), 10.0, min(durs) / 2 - 0.1))
+        durs.append(t["duration"] or probe_duration(p))
+    known = [d for d in durs if d]
+    xf = max(0.0, min(float(body.crossfade), 10.0, (min(known) / 2 - 0.1) if known else 10.0))
     gap = 0.0 if xf > 0 else max(0.0, min(float(body.gap), 10.0))
+    artists = []
+    for t in rows:
+        if t["artist"] and t["artist"] not in artists:
+            artists.append(t["artist"])
+    n = len(rows)
+    title = (body.title or " + ".join(t["title"] for t in rows[:3]) + (" …" if n > 3 else "")).strip()[:200]
+    artist = ", ".join(artists[:3]) + (" & more" if len(artists) > 3 else "")
+    return {"rows": rows, "paths": paths, "durs": durs, "xf": xf, "gap": gap, "title": title, "artist": artist}
 
+
+@app.post("/api/edit/merge")
+def edit_merge(body: MergeIn):
+    """Join songs one after another into a NEW song."""
+    _need_ffmpeg()
+    p = _merge_plan(body)
+    paths, xf, gap, n = p["paths"], p["xf"], p["gap"], len(p["paths"])
+    if any(d is None for d in p["durs"]):
+        raise HTTPException(422, "Couldn't read the length of one of the songs")
     cmd = ["ffmpeg", "-y", "-v", "error"]
-    for p in paths:
-        cmd += ["-i", str(p)]
+    for path in paths:
+        cmd += ["-i", str(path)]
     f = []
     for i in range(n):
         pad = f",apad=pad_dur={gap:.3f}" if gap > 0 and i < n - 1 else ""
@@ -1153,19 +1174,64 @@ def edit_merge(body: MergeIn):
             prev = nxt
     else:
         f.append("".join(f"[a{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[out]")
-
-    artists = []
-    for t in rows:
-        if t["artist"] and t["artist"] not in artists:
-            artists.append(t["artist"])
-    title = (body.title or " + ".join(t["title"] for t in rows[:3]) + (" …" if n > 3 else "")).strip()[:200]
-    artist = ", ".join(artists[:3]) + (" & more" if len(artists) > 3 else "")
     tid = f"mix-{uuid.uuid4().hex[:12]}"
     out = AUDIO_DIR / f"{tid}.m4a"
     _run_ffmpeg(cmd + ["-filter_complex", ";".join(f), "-map", "[out]", "-vn", "-c:a", "aac", "-b:a", "256k",
-                       "-metadata", f"title={title}", "-metadata", f"artist={artist}", str(out)])
-    return _save_new_track(tid, out, title, artist, "Combined songs", "Mix",
-                           "mix://" + ",".join(body.track_ids), cover_from=rows[0]["id"])
+                       "-metadata", f"title={p['title']}", "-metadata", f"artist={p['artist']}", str(out)])
+    return _save_new_track(tid, out, p["title"], p["artist"], "Combined songs", "Mix",
+                           "mix://" + ",".join(body.track_ids), cover_from=p["rows"][0]["id"])
+
+
+# ---------- the built-in Android editor (used when FFmpeg can't run on a phone):
+# the server plans the edit, the phone does the sound processing, then the server files the result.
+_PENDING_EDITS: dict[str, dict] = {}
+
+
+@app.get("/api/tracks/{tid}/source")
+def track_source(tid: str):
+    path = ensure_audio(tid)
+    with db() as con:
+        t = con.execute("SELECT duration FROM tracks WHERE id=?", (tid,)).fetchone()
+    return {"path": str(path), "duration": t["duration"] if t else None}
+
+
+@app.post("/api/edit/plan-trim")
+def plan_trim(body: TrimIn):
+    p = _trim_plan(body)
+    t = p["t"]
+    tid = f"edit-{uuid.uuid4().hex[:12]}"
+    out = AUDIO_DIR / f"{tid}.m4a"
+    _PENDING_EDITS[tid] = {"out": out, "title": p["title"], "artist": t["artist"] or "", "album": t["album"] or "",
+                           "platform": "Edited", "source": f"edit://{t['id']}", "cover_from": t["id"]}
+    return {"id": tid, "src": str(p["src"]), "out": str(out), "keep": p["keep"],
+            "fade_in": p["fi"], "fade_out": p["fo"], "total": p["total"]}
+
+
+@app.post("/api/edit/plan-merge")
+def plan_merge(body: MergeIn):
+    p = _merge_plan(body)
+    tid = f"mix-{uuid.uuid4().hex[:12]}"
+    out = AUDIO_DIR / f"{tid}.m4a"
+    _PENDING_EDITS[tid] = {"out": out, "title": p["title"], "artist": p["artist"], "album": "Combined songs",
+                           "platform": "Mix", "source": "mix://" + ",".join(body.track_ids), "cover_from": p["rows"][0]["id"]}
+    return {"id": tid, "srcs": [str(x) for x in p["paths"]], "out": str(out), "crossfade": p["xf"], "gap": p["gap"]}
+
+
+class FinishIn(BaseModel):
+    id: str
+    duration: Optional[float] = None
+
+
+@app.post("/api/edit/finish")
+def edit_finish(body: FinishIn):
+    job = _PENDING_EDITS.pop(body.id, None)
+    if not job:
+        raise HTTPException(404, "That edit has expired. Please save it again.")
+    out = job["out"]
+    if not out.exists() or out.stat().st_size < 1000:
+        raise HTTPException(500, "The edited song wasn't saved. Please try again.")
+    return _save_new_track(body.id, out, job["title"], job["artist"], job["album"], job["platform"],
+                           job["source"], cover_from=job["cover_from"], duration=body.duration)
 
 
 class DeviceItem(BaseModel):
