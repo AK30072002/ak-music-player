@@ -70,7 +70,7 @@ Everything runs on your phone. Install the app and start playing: no computer an
 Go to **Settings → Accounts** and sign in to that site (Instagram, Facebook or X), then try the link again.
 
 **Editing or MP3 downloads on some phones**
-On some phones Android doesn't allow the bundled FFmpeg program to run. The app then edits and combines songs with Android's own built-in audio tools instead (saved as high-quality M4A), and downloads keep the original quality, because Android has no built-in MP3 encoder. **Settings → Music engine** shows which one your phone uses and why.
+The app uses the Android build of FFmpeg from the youtubedl-android project (the same one Seal and YTDLnis use), which runs on all current phones. If FFmpeg still can't run on a phone, the app edits and combines songs with Android's own built-in audio tools instead (saved as high-quality M4A), and downloads keep the original quality, because Android has no built-in MP3 encoder. **Settings → Music engine** shows which one your phone uses and why.
 
 **A Spotify / Apple Music song plays the wrong version**
 The app picks the closest match on YouTube by name and length. If it's wrong, tap **⋯ → Edit details**, correct the title or artist, delete the song, and share the link again; or paste the YouTube link of the version you want.
@@ -130,4 +130,4 @@ AK Music Player is a personal tool. Only download what you have the right to sav
 
 Made by **AJAIKRISHNA**. © 2026 AJAIKRISHNA. All rights reserved.
 
-Built with [Chaquopy](https://chaquo.com/chaquopy/) (MIT), [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense), [FFmpeg](https://ffmpeg.org) static builds by John Van Sickle via [ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) (GPL), [QuickJS-ng](https://github.com/quickjs-ng/quickjs) (MIT), [FastAPI](https://fastapi.tiangolo.com) (MIT), lyrics from [LRCLIB](https://lrclib.net), and song matching help from [Odesli / song.link](https://odesli.co), Apple's iTunes Search API and Deezer's public API. Notification icons from Google's Material Icons (Apache 2.0).
+Built with [Chaquopy](https://chaquo.com/chaquopy/) (MIT), [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense), [FFmpeg](https://ffmpeg.org) 7.1 built for Android by the [youtubedl-android](https://github.com/yausername/youtubedl-android) project (GPL-3.0; build instructions in its BUILD_FFMPEG.md), [QuickJS-ng](https://github.com/quickjs-ng/quickjs) (MIT), [FastAPI](https://fastapi.tiangolo.com) (MIT), lyrics from [LRCLIB](https://lrclib.net), and song matching help from [Odesli / song.link](https://odesli.co), Apple's iTunes Search API and Deezer's public API. Notification icons from Google's Material Icons (Apache 2.0).

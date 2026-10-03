@@ -53,7 +53,7 @@ MP3_BITRATE = os.environ.get("AK_MP3_BITRATE", "320k")
 ON_ANDROID = os.environ.get("AK_PLATFORM") == "android"   # running inside the Android app
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 HAS_FFPROBE = shutil.which("ffprobe") is not None
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 
 AUDIO_TYPES = {

@@ -20,7 +20,7 @@ android {
         minSdk 26          // Android 8.0+
         targetSdk 34
         versionCode Integer.parseInt(env.get('AK_VERSION_CODE') ?: '1')
-        versionName env.get('AK_VERSION_NAME') ?: '2.1.0'
+        versionName env.get('AK_VERSION_NAME') ?: '2.2.0'
         ndk {
             abiFilters abi
         }
@@ -52,12 +52,12 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
-    // FFmpeg and QuickJS (src/main/jniLibs, downloaded by the workflow) are programs, not
-    // libraries: install them as real files so the app can run them, and don't strip them.
+    // FFmpeg, FFprobe and QuickJS (src/main/jniLibs, downloaded by the workflow) are programs,
+    // not libraries: install them as real files so the app can run them, and don't strip them.
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            keepDebugSymbols += ['**/libffmpeg.so', '**/libqjs.so']
+            keepDebugSymbols += ['**/libffmpeg.so', '**/libffprobe.so', '**/libffmpeg.zip.so', '**/libqjs.so']
         }
     }
 

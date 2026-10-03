@@ -22,12 +22,14 @@ final class ServerManager {
     }
 
     static synchronized int start(Context ctx) throws Exception {
-        // FFmpeg and QuickJS are packaged as native libraries so Android installs them as
-        // executables. Link them under their real names so yt-dlp can find them on the PATH.
+        // FFmpeg (the Android build from the youtubedl-android project, as used by Seal) and QuickJS
+        // are packaged as native libraries so Android installs them as runnable programs. Link
+        // them under their real names so yt-dlp and the engine find them on the PATH.
         File bin = new File(ctx.getFilesDir(), "bin");
         if (!bin.isDirectory() && !bin.mkdirs()) throw new IOException("Can't create " + bin);
         String libDir = ctx.getApplicationInfo().nativeLibraryDir;
         link(new File(libDir, "libffmpeg.so"), new File(bin, "ffmpeg"));
+        link(new File(libDir, "libffprobe.so"), new File(bin, "ffprobe"));
         link(new File(libDir, "libqjs.so"), new File(bin, "qjs"));
 
         LoginActivity.exportCookies(ctx);
@@ -39,7 +41,8 @@ final class ServerManager {
                 ctx.getFilesDir().getAbsolutePath(),
                 cache.getAbsolutePath(),
                 bin.getAbsolutePath(),
-                8765).toInt();
+                8765,
+                libDir).toInt();
     }
 
     /** Error text if the engine thread crashed, otherwise "". */

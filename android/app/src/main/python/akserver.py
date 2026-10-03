@@ -8,6 +8,8 @@ The server, the web player and its tools all live in the APK:
 """
 import json
 import os
+import shutil
+import stat
 import socket
 import subprocess
 import sys
@@ -41,7 +43,7 @@ def _works(cmd):
 def _check_tools(bin_dir):
     """Remove any bundled tool that can't run on this phone, so the server falls back gracefully."""
     status = {}
-    for name, test in (("ffmpeg", ["-hide_banner", "-version"]), ("qjs", ["-e", "1"])):
+    for name, test in (("ffmpeg", ["-hide_banner", "-version"]), ("ffprobe", ["-hide_banner", "-version"]), ("qjs", ["-e", "1"])):
         path = os.path.join(bin_dir, name)
         if not os.path.exists(path):
             ok, why = False, "not included in this app build"
@@ -119,6 +121,48 @@ def _update_ytdlp(files_dir, current_version):
         print(f"AK Music Player: yt-dlp update check failed: {e}", file=sys.stderr)
 
 
+# ---------------------------------------------------------------- FFmpeg for Android
+# The app ships the Android build of FFmpeg from the youtubedl-android project (the one Seal and
+# YTDLnis use): libffmpeg.so / libffprobe.so are the programs, libffmpeg.zip.so bundles their
+# libraries. The libraries are unpacked once per app version; FFmpeg finds them via LD_LIBRARY_PATH.
+def _unpack_ffmpeg_libs(native_dir, files_dir):
+    bundle = os.path.join(native_dir or "", "libffmpeg.zip.so")
+    if not native_dir or not os.path.exists(bundle):
+        return None
+    target = os.path.join(files_dir, "ffmpeg-android")
+    stamp = os.path.join(target, ".bundle")
+    version = f"{os.path.getsize(bundle)}-{int(os.path.getmtime(bundle))}"
+    try:
+        with open(stamp) as f:
+            ready = f.read() == version
+    except OSError:
+        ready = False
+    if not ready:
+        shutil.rmtree(target, ignore_errors=True)
+        os.makedirs(target, exist_ok=True)
+        root = os.path.realpath(target) + os.sep
+        with zipfile.ZipFile(bundle) as z:
+            for info in z.infolist():
+                dest = os.path.realpath(os.path.join(target, info.filename))
+                if not dest.startswith(root):
+                    continue                              # never write outside the folder
+                mode = info.external_attr >> 16
+                if info.is_dir():
+                    os.makedirs(dest, exist_ok=True)
+                elif stat.S_ISLNK(mode):                  # e.g. libavcodec.so -> libavcodec.so.61.19.101
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    if os.path.lexists(dest):
+                        os.remove(dest)
+                    os.symlink(z.read(info).decode(), dest)
+                else:
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    with z.open(info) as src, open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out, 1024 * 1024)
+        with open(stamp, "w") as f:
+            f.write(version)
+    return os.path.join(target, "usr", "lib")
+
+
 def _free_port(preferred):
     for port in [preferred] + list(range(preferred + 1, preferred + 30)):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -140,7 +184,7 @@ def _run():
         _error = traceback.format_exc()
 
 
-def start(files_dir, cache_dir, bin_dir, preferred_port=8765):
+def start(files_dir, cache_dir, bin_dir, preferred_port=8765, native_dir=""):
     """Start the server in a background thread (once) and return its port."""
     global _server, _thread, _port, _error
     if _thread is not None and _thread.is_alive():
@@ -158,10 +202,15 @@ def start(files_dir, cache_dir, bin_dir, preferred_port=8765):
         "XDG_CACHE_HOME": cache_dir,
         "HOME": files_dir,
         "PATH": bin_dir + os.pathsep + os.environ.get("PATH", "/system/bin"),
-        # FFmpeg is a standard Linux program; Android's security filter can block a startup
-        # feature newer Linux programs use ("rseq"). Turning it off lets FFmpeg run on more phones.
-        "GLIBC_TUNABLES": "glibc.pthread.rseq=0",
     })
+    try:
+        lib_dir = _unpack_ffmpeg_libs(native_dir, files_dir)
+    except Exception as e:
+        lib_dir = None
+        print(f"AK Music Player: couldn't unpack FFmpeg libraries: {e}", file=sys.stderr)
+    if lib_dir:
+        old = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = lib_dir + (os.pathsep + old if old else "")
     tempfile.tempdir = cache_dir
     tools = _check_tools(bin_dir)
     os.environ["AK_TOOLS"] = json.dumps(tools)
