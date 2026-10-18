@@ -29,6 +29,20 @@ const ago = ts => {
 };
 const shuffleArr = a => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const openExternal = u => { if (IN_APP) { try { return AKA.openExternal(u); } catch { } } open(u, '_blank', 'noopener'); };
+/* Shared text often wraps the link: "Check out this song on Spotify! https://…", "🎵 Song – Artist https://…".
+   Find the link inside, drop punctuation stuck to its end, and accept links without https:// too. */
+function extractLink(text) {
+  const t = String(text || '').replace(/[\u200b-\u200d\ufeff]/g, ' ').trim();
+  let m = t.match(/https?:\/\/[^\s<>"'“”‘’]+/i);
+  let url = m ? m[0] : null;
+  if (!url) {
+    m = t.match(/(?:^|[\s(])((?:www\.|m\.|music\.|open\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|in|be|link|to|app|co|net|org|me|fm|io|watch|page\.link)\/[^\s<>"'“”‘’]*)/i);
+    if (m) url = 'https://' + m[1];
+  }
+  if (!url) return null;
+  url = url.replace(/[)\].,;:!?…»。、]+$/u, '');
+  return url;
+}
 const store = (k, v) => { try { localStorage.setItem('akmp.' + k, JSON.stringify(v)); } catch { } };
 const load = k => { try { return JSON.parse(localStorage.getItem('akmp.' + k)); } catch { return null; } };
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
@@ -110,7 +124,7 @@ async function api(path, { method = 'GET', body, form } = {}) {
   }
   return data;
 }
-const audioUrl = t => `/api/tracks/${encodeURIComponent(t.id)}/audio`;
+const audioUrl = t => `/api/tracks/${encodeURIComponent(t.id)}/audio${t._rev ? '?r=' + t._rev : ''}`;
 
 /* ================================================================ settings */
 const DEFAULTS = {
@@ -284,7 +298,11 @@ async function playIndex(i, { autoplay = true, startAt = 0 } = {}) {
   if (startAt > 0) d.addEventListener('loadedmetadata', () => { d.currentTime = startAt; }, { once: true });
   if (autoplay) {
     try { initAudioGraph(); await actx?.resume?.(); await d.play(); }
-    catch (e) { if (e.name !== 'AbortError') toast('Press play to start listening'); }
+    catch (e) {
+      if (token !== P.token) return;
+      if (e.name === 'NotSupportedError' || d.error) return;   // the file itself failed: repairPlayback() takes over
+      if (e.name !== 'AbortError') toast('Press play to start listening');
+    }
   }
   if (token !== P.token) return;
   setLoading(false); renderNow(); updateMediaSession(); prefetchNext();
@@ -311,7 +329,7 @@ function togglePlay() {
   const t = current();
   if (!t) {
     if (P.queue.length) return playIndex(0);
-    toast('Paste a link to start playing'); $$('[data-paste] input[type="url"]').find(i => i.offsetParent)?.focus(); return;
+    toast('Paste a link to start playing'); $$('[data-paste] input.link-in').find(i => i.offsetParent)?.focus(); return;
   }
   const d = decks[active];
   const src = d.getAttribute('src') || '';
@@ -379,15 +397,52 @@ decks.forEach((d, i) => {
   d.addEventListener('ended', () => { if (i === active) onEnded(); });
   d.addEventListener('waiting', () => { if (i === active) setLoading(true); });
   d.addEventListener('playing', () => { if (i === active) setLoading(false); });
-  d.addEventListener('loadedmetadata', () => { if (i === active) onTime(); });
+  d.addEventListener('loadedmetadata', () => { if (i === active) { onTime(); notifyNative(true); } });
+  d.addEventListener('seeked', () => { if (i === active) notifyNative(true); });
+  d.addEventListener('ratechange', () => { if (i === active) notifyNative(true); });
+  d.addEventListener('playing', () => { if (i === active) notifyNative(true); });
   d.addEventListener('error', () => {
     const src = d.getAttribute('src') || '';
-    if (i === active && src && !src.startsWith('data:')) {
-      setLoading(false);
-      toast("This song stopped loading. Try playing it again.", { error: true });
-    }
+    if (i === active && src && !src.startsWith('data:')) repairPlayback(d);
   });
 });
+
+/* ---------- a song that won't play: repair it once (fresh download in the most compatible format), resume */
+const MEDIA_ERRORS = { 1: 'loading was stopped', 2: 'network problem', 3: "the audio couldn't be decoded", 4: "the file wasn't playable" };
+let repairing = null;
+async function repairPlayback(d) {
+  const t = current();
+  if (!t || repairing === t.id) return;
+  const err = d.error;
+  const why = err ? (MEDIA_ERRORS[err.code] || 'unknown error') + (err.message ? ` (${err.message})` : '') : 'unknown error';
+  const at = d.currentTime || 0, token = P.token;
+  setLoading(false);
+  if (t._repaired) {
+    api('/problems', { method: 'POST', body: { where: 'player', message: why, song: t.title } }).catch(() => { });
+    toast(`“${t.title}” won't play: ${why}. Settings → Recent problems has the details.`, { error: true, ms: 9000 });
+    if (P.errSkips < 3 && nextIndex(true) !== null) { P.errSkips++; next(true); }
+    return;
+  }
+  repairing = t.id;
+  t._repaired = true;
+  const tst = toast('<span class="spinner"></span> This song didn\'t load properly. Fixing it…', { sticky: true, html: true });
+  setLoading(true);
+  try {
+    const fixed = await api(`/tracks/${encodeURIComponent(t.id)}/repair`, { method: 'POST' });
+    syncTrack(fixed);
+    if (token !== P.token) return;
+    t._rev = Date.now();
+    d.src = audioUrl(t);
+    d.defaultPlaybackRate = d.playbackRate = settings.speed;
+    if (at > 1) d.addEventListener('loadedmetadata', () => { d.currentTime = at; }, { once: true });
+    await d.play().catch(() => { });
+  } catch (e) {
+    api('/problems', { method: 'POST', body: { where: 'player', message: `${why}; repair failed: ${e.message}`, song: t.title } }).catch(() => { });
+    toast(`Couldn't fix “${t.title}”: ${e.message}`, { error: true, ms: 9000 });
+  } finally {
+    tst.remove(); repairing = null; setLoading(false);
+  }
+}
 
 /* ---------- queue operations */
 function playList(list, start = 0, { from = '', shuffle } = {}) {
@@ -547,15 +602,19 @@ if ('mediaSession' in navigator) {
 /* ================================================================ player UI */
 const playBtns = () => [$('#playBtn'), $('#npPlay')];
 let lastNative = '';
-function notifyNative() {
+// Tells Android what's playing, how long it is and where we are, for the notification, lock screen
+// and headphones. Android moves the progress bar by itself between updates, so we only send changes.
+function notifyNative(force = false) {
   if (!IN_APP) return;
-  const t = current();
+  const t = current(), d = decks[active];
   const st = t ? { title: t.title || '', artist: t.artist || t.platform || '', playing: P.playing,
-    cover: t.cover ? new URL(t.cover, location.href).href : '' } : { title: '', artist: '', playing: false, cover: '' };
+    cover: t.cover ? new URL(t.cover, location.href).href : '',
+    duration: Math.round((isFinite(d.duration) && d.duration > 0 ? d.duration : (t.duration || 0)) * 1000),
+    rate: d.playbackRate || 1 } : { title: '', artist: '', playing: false, cover: '', duration: 0, rate: 1 };
   const key = JSON.stringify(st);
-  if (key === lastNative) return;
+  if (key === lastNative && !force) return;
   lastNative = key;
-  try { AKA.onState(key); } catch { }
+  try { AKA.onState(JSON.stringify({ ...st, position: Math.round((t ? d.currentTime || 0 : 0) * 1000) })); } catch { }
 }
 function setPlaying(b) {
   P.playing = b;
@@ -1005,15 +1064,15 @@ function trackMenu(t, ctx = {}) {
 
 /* ================================================================ adding links & files */
 async function addLink(raw, { mode = settings.onPaste, playlistId } = {}) {
-  const url = (raw || '').trim();
-  if (!url) return;
-  if (!/https?:\/\//i.test(url)) { toast('Paste a full link that starts with http:// or https://', { error: true }); return; }
+  if (!(raw || '').trim()) return;
+  const url = extractLink(raw);
+  if (!url) { toast("There's no link in what you pasted. Copy the link from the app's Share button and paste it here.", { error: true, ms: 7000 }); return; }
   $$('[data-paste]').forEach(f => f.classList.add('busy'));
   const tst = toast('<span class="spinner"></span> Looking up that link…', { sticky: true, html: true });
   const musicApp = /spotify|music\.apple|music\.amazon|amazon\.[a-z.]+\/music|deezer|tidal|gaana|wynk|hungama|resso|boomplay|anghami|shazam/i.test(url);
   try {
     const r = await api('/add', { method: 'POST', body: { url, playlist_id: playlistId || null } });
-    $$('[data-paste] input[type="url"]').forEach(i => { i.value = ''; });
+    $$('[data-paste] input.link-in').forEach(i => { i.value = ''; });
     const n = r.tracks.length;
     if (r.playlist) {
       await refreshPlaylists();
@@ -1058,12 +1117,12 @@ document.addEventListener('submit', e => {
   const f = e.target.closest('[data-paste]');
   if (!f) return;
   e.preventDefault();
-  addLink(f.querySelector('input[type="url"]').value);
+  addLink(f.querySelector('input.link-in').value);
 });
 document.addEventListener('paste', e => {
   if (e.target.closest('input, textarea, [contenteditable]')) return;
   const text = e.clipboardData?.getData('text') || '';
-  if (/https?:\/\//i.test(text)) { e.preventDefault(); addLink(text); }
+  if (extractLink(text)) { e.preventDefault(); addLink(text); }
 });
 $('#clipBtn').addEventListener('click', async () => {
   try {
@@ -1169,8 +1228,8 @@ async function viewHome() {
   const hero = `<section class="hero">
     <h1>What are we playing?</h1>
     <p>Paste or share a link from YouTube, Instagram, Spotify, Apple Music, Amazon Music or 1,000+ other sites. AK Music Player plays just the audio, with no ads, and keeps it in your library.</p>
-    <form class="paste" data-paste autocomplete="off">${ic('link')}
-      <input type="url" inputmode="url" placeholder="https://…" aria-label="Link to play">
+    <form class="paste" data-paste autocomplete="off" novalidate>${ic('link')}
+      <input class="link-in" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="Paste a link…" aria-label="Link to play">
       <label class="icon-btn sm" title="Add audio files" aria-label="Upload audio files">${ic('upload')}<input type="file" accept="audio/*" multiple hidden data-upload></label>
       <button class="primary-btn">Play</button></form>
     <div class="sources"><span>YouTube &amp; YouTube Music</span><span>Instagram reels</span><span>Spotify</span><span>Apple Music</span><span>Amazon Music</span><span>JioSaavn</span><span>Gaana</span><span>Wynk</span><span>SoundCloud</span><span>Deezer</span><span>TikTok</span><span>Playlists &amp; albums</span></div>
@@ -1351,9 +1410,9 @@ window.akEditDone = (id, ok, payload) => {
 };
 async function ensureHealth() { if (!S.health) S.health = await api('/health').catch(() => null); }
 const noEditing = () => `<div class="empty"><h3>Editing isn't available here</h3><p>Editing needs FFmpeg, which couldn't run on this device. Playing and downloading still work.</p></div>`;
-function resultPanel(t, again) {
+function resultPanel(t, again, replaced = false) {
   const fmt = (S.health?.formats || []).includes('mp3') ? 'mp3' : 'original';
-  return `<div class="done-card">${ic('check')}<div class="done-text"><b>Saved “${esc(t.title)}”</b><span>${fmtTime(t.duration)} long, now in your library</span></div>
+  return `<div class="done-card">${ic('check')}<div class="done-text"><b>Saved “${esc(t.title)}”</b><span>${fmtTime(t.duration)} long${replaced ? ', replacing the original' : ', now in your library'}</span></div>
     <div class="row-btns"><button class="chip on" data-done="play">${ic('play')}Play</button>
     <button class="chip" data-done="download" data-fmt="${fmt}">${ic('download')}${IN_APP ? 'Save to phone' : 'Download'}${fmt === 'mp3' ? ' (MP3)' : ''}</button>
     <a class="chip" href="#/edit/${encodeURIComponent(t.id)}">${ic('scissors')}${again}</a></div></div>`;
@@ -1433,10 +1492,14 @@ async function viewEdit(r) {
       <div class="field"><div class="lbl">Fade out <span id="foVal">Off</span></div><input type="range" id="edFo" min="0" max="10" step="0.5" value="0" aria-label="Fade out seconds"></div>
     </section>
     <section class="ed-sec"><h2>Save</h2>
-      <label class="lbl-plain" for="edTitle">Name of the new song</label>
-      <input class="text-in" id="edTitle" value="${esc(t.title)} (edit)" maxlength="200">
+      <label class="switch"><span>Replace the original<small>${t.platform === 'Phone'
+        ? 'Keeps only the edited version: the original file is deleted from your phone (Android asks you first) and the edited song is saved to Downloads/AK Music Player.'
+        : 'Keeps only the edited version. Its likes, plays and playlist places move to the edited song.'}</small></span>
+        <input type="checkbox" id="edReplace" ${settings.editReplace !== false ? 'checked' : ''}></label>
+      <label class="lbl-plain" for="edTitle">Song name</label>
+      <input class="text-in" id="edTitle" value="${esc(t.title)}${settings.editReplace !== false ? '' : ' (edit)'}" data-orig="${esc(t.title)}" maxlength="200">
       <div class="row-btns"><button class="primary-btn" id="edSave">Save as new song</button><button class="ghost-btn" data-ed="cancel">Cancel</button></div>
-      <p class="hint">Your original song stays exactly as it is.</p>
+      <p class="hint" id="edKeepHint" ${settings.editReplace !== false ? 'hidden' : ''}>Your original song stays exactly as it is.</p>
       <div id="edResult"></div>
     </section>
   </div>`;
@@ -1536,6 +1599,13 @@ afterRender.edit = async r => {
     edSync(); edDraw();
   });
   $('#edSave').onclick = edSave;
+  $('#edReplace').addEventListener('change', e => {
+    settings.editReplace = e.target.checked; saveSettings();
+    const ti = $('#edTitle'), orig = ti.dataset.orig;
+    if (e.target.checked && ti.value === orig + ' (edit)') ti.value = orig;
+    else if (!e.target.checked && ti.value === orig) ti.value = orig + ' (edit)';
+    $('#edKeepHint').hidden = e.target.checked;
+  });
 };
 
 function edFix(which) {
@@ -1623,6 +1693,23 @@ function edLoop() {
   edShowTime(); edDraw();
   if (!a.paused) ED.raf = requestAnimationFrame(edLoop);
 }
+/* The edited song takes the original's place: in the library, playlists, queue, and (for songs stored on
+   the phone) on the phone itself. */
+async function replaceOriginal(orig, nt) {
+  const r = await api(`/tracks/${encodeURIComponent(nt.id)}/replace-original`, { method: 'POST', body: { original_id: orig.id } });
+  Object.assign(nt, r.track);
+  const wasCurrent = current()?.id === orig.id, wasPlaying = wasCurrent && P.playing;
+  [P.queue, P.original].forEach(q => q && q.forEach((t, i) => { if (t.id === orig.id) q[i] = nt; }));
+  if (wasCurrent) { wasPlaying ? playIndex(P.index) : renderNow(); }
+  renderPanelIf('queue'); saveSession(); refreshPlaylists();
+  if (r.phone_path && IN_APP) {
+    const fmt = (S.health?.formats || []).includes('mp3') && r.original_ext === '.mp3' ? 'mp3' : 'original';
+    downloadTrack(nt, fmt);                                       // the edited version goes onto the phone
+    let item = null;
+    try { item = JSON.parse(AKA.listDeviceAudio() || '[]').find(it => it.path === r.phone_path); } catch { }
+    if (item) { PH.deleting = [item]; AKA.deleteDeviceAudio(JSON.stringify([{ id: item.id, path: item.path }])); }
+  }
+}
 async function edSave() {
   if (!ED) return;
   if (edNewLength() < 0.5) return toast('Keep at least half a second of the song', { error: true });
@@ -1638,9 +1725,21 @@ async function edSave() {
       const res = await nativeJob({ op: 'trim', src: plan.src, keep: plan.keep, fadeIn: plan.fade_in, fadeOut: plan.fade_out, out: plan.out });
       nt = await api('/edit/finish', { method: 'POST', body: { id: plan.id, duration: res.duration } });
     } else nt = await api('/edit/trim', { method: 'POST', body });
+    let replaced = false;
+    if ($('#edReplace')?.checked) {
+      try { await replaceOriginal(ED.t, nt); replaced = true; }
+      catch (e) { toast(`Saved the edit, but couldn't remove the original: ${e.message}`, { error: true, ms: 8000 }); }
+    }
     const res = $('#edResult');
-    if (res) { res.innerHTML = resultPanel(nt, 'Edit the new song'); hydrate(res); wireResult(res, nt); res.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
-    toast(`Saved “${nt.title}” (${fmtTime(nt.duration)})`);
+    if (res) {
+      res.innerHTML = resultPanel(nt, 'Edit it again', replaced); hydrate(res); wireResult(res, nt);
+      res.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    if (replaced) {
+      btn.hidden = true; ED.audio.pause();
+      const cancel = $('[data-ed="cancel"]'); if (cancel) cancel.textContent = 'Done';
+    }      // the original is gone; further edits start from the new song
+    toast(replaced ? `Saved “${nt.title}” (${fmtTime(nt.duration)}) in place of the original` : `Saved “${nt.title}” (${fmtTime(nt.duration)})`);
   } catch (e) { toast(e.message, { error: true, ms: 8000 }); }
   finally { tst.remove(); btn.disabled = false; }
 }
@@ -1875,9 +1974,9 @@ window.akDeviceDeleted = async (ok, msg) => {
     for (let i = P.queue.length - 1; i >= 0; i--) if (gone.has(P.queue[i].id) && i !== P.index) removeFromQueue(i);
     if (wasCurrent) { decks.forEach(d => d.pause()); if (nextIndex(true) !== null) next(true); }
   } catch { }
-  toast(items.length === 1 ? `Deleted “${items[0].title}”` : `Deleted ${items.length} files`);
-  PH.sel.clear(); PH.select = false; cbPhoneItems = null;
-  route();
+  toast(items.length === 1 ? `Deleted “${items[0].title}” from your phone` : `Deleted ${items.length} files`);
+  PH.sel.clear(); PH.select = false; cbPhoneItems = null; PH.items = null;
+  if (currentRoute().name === 'phone') route();     // (in the editor the result card stays on screen)
 };
 window.akAudioPermission = (granted, canAskAgain) => {
   if (granted) return route();
@@ -1965,7 +2064,7 @@ function accountsHTML() {
 }
 window.akAccountsChanged = () => { if (currentRoute().name === 'settings') route(); toast('Signed in. Try your link again.'); };
 async function viewSettings() {
-  const [health, storage] = await Promise.all([api('/health').catch(() => null), api('/storage').catch(() => null)]);
+  const [health, storage, problems] = await Promise.all([api('/health').catch(() => null), api('/storage').catch(() => null), api('/problems').catch(() => [])]);
   const opt = (name, val, label) => `<button class="chip ${settings[name] === val ? 'on' : ''}" data-set="${name}" data-val="${val}">${label}</button>`;
   return `<div class="view-head"><div><h1>Settings</h1></div></div><div class="settings">
     <section><h2>Appearance</h2><div class="chips">${opt('theme', 'auto', 'Match my device')}${opt('theme', 'dark', 'Dark')}${opt('theme', 'light', 'Light')}</div></section>
@@ -1994,6 +2093,11 @@ async function viewSettings() {
     <section><h2>${IN_APP ? 'Music engine' : 'Server'}</h2><p>${health ? `Version ${esc(health.version)}. yt-dlp ${esc(health.yt_dlp)}. FFmpeg ${health.ffmpeg ? 'installed' : IN_APP
   ? `couldn't run on this phone${health.tools?.ffmpeg?.error ? ' (' + esc(health.tools.ffmpeg.error) + ')' : ''}, so editing uses Android's built-in audio tools and downloads keep the original quality`
   : '<b style="color:var(--danger)">not found</b> — install it to download MP3/FLAC'}. ${IN_APP ? `YouTube helper ${health.js_runtime ? 'ready' : '<b style="color:var(--danger)">unavailable</b> (some YouTube videos may not play)'}.` : `Login cookies ${health.cookies ? 'configured' : 'not set (needed for some Instagram posts)'}.`}` : "Can't reach the server."}</p></section>
+    <section><h2>Recent problems</h2>
+      ${problems.length ? `<p>If something didn't work, take a screenshot of this list to report it.</p><div class="problems">${problems.slice(0, 15).map(p => `<div class="problem">
+        <div class="pr-head"><b>${esc(p.where)}</b><span>${esc(ago(p.time))}</span></div>${p.song ? `<div class="pr-song">${esc(p.song)}</div>` : ''}<div class="pr-msg">${esc(p.message)}</div></div>`).join('')}</div>
+        <div class="row-btns"><button class="chip" data-act="clear-problems">${ic('trash')}Clear list</button></div>`
+      : '<p>No problems since the app started.</p>'}</section>
   </div>`;
 }
 afterRender.settings = () => {
@@ -2048,6 +2152,7 @@ async function handleAct(act, el) {
         toast('Signed out'); route();
       }
       return;
+    case 'clear-problems': await api('/problems', { method: 'DELETE' }); return route();
     case 'clear-exports': await api('/storage/exports', { method: 'DELETE' }); toast('Converted downloads cleared'); return route();
   }
 }
@@ -2242,7 +2347,7 @@ document.addEventListener('keydown', e => {
     'l': () => current() && toggleLike(current()),
     'f': () => $('#nowPlaying').hidden ? openNowPlaying() : closeNowPlaying(),
     'q': () => openPanel('queue'),
-    '/': () => { closeNowPlaying(); $$('[data-paste] input[type="url"]').find(i => i.offsetParent)?.focus(); },
+    '/': () => { closeNowPlaying(); $$('[data-paste] input.link-in').find(i => i.offsetParent)?.focus(); },
   };
   const fn = actions[k] || actions[k.toLowerCase()];
   if (!fn) return;
@@ -2252,9 +2357,10 @@ document.addEventListener('keydown', e => {
 });
 
 /* ================================================================ native shell hooks */
-window.akCommand = cmd => ({
+window.akCommand = (cmd, arg) => ({
   toggle: togglePlay, next: () => next(), prev,
   play: () => { if (!P.playing) togglePlay(); }, pause: () => { if (P.playing) togglePlay(); },
+  seek: () => seekTo((+arg || 0) / 1000),
 }[cmd] || (() => { }))();
 window.akShared = url => addLink(url);
 window.akBack = () => {
@@ -2279,8 +2385,8 @@ refreshPlaylists().then(route);
 // links shared to the installed app (Android share sheet) or opened as /?url=…
 {
   const qs = new URLSearchParams(location.search);
-  const shared = [qs.get('url'), qs.get('text'), qs.get('title')].find(v => v && /https?:\/\//.test(v));
-  if (shared) { history.replaceState(null, '', location.pathname + location.hash); addLink(shared.match(/https?:\/\/\S+/)[0]); }
+  const shared = [qs.get('url'), qs.get('text'), qs.get('title')].find(v => v && extractLink(v));
+  if (shared) { history.replaceState(null, '', location.pathname + location.hash); addLink(shared); }
 }
 api('/health').then(h => { S.health = h; }).catch(() => IN_APP
   ? toast("The music engine stopped.", { error: true, sticky: true, action: ['Restart', () => { try { AKA.retry(); } catch { location.reload(); } }] })

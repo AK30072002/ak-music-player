@@ -20,7 +20,15 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
+import os
+
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+# Sites hand link-preview robots (WhatsApp, Facebook) a light page with the song's name and artwork;
+# that's the most reliable way to read a song link without the site's own app.
+PREVIEW_UAS = ("facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+               "WhatsApp/2.24.20.79 A", UA)
+# song.link stopped free access in October 2026; it's only used if you set your own key.
+ODESLI_KEY = os.environ.get("AK_ODESLI_KEY", "")
 MAX_TRACKS = 500
 
 
@@ -49,6 +57,7 @@ SERVICES = [
     (r"(^|\.)song\.link$|(^|\.)album\.link$|(^|\.)odesli\.co$|(^|\.)songwhip\.com$|(^|\.)lnk\.to$", "Song link"),
 ]
 SHORT_HOSTS = ("spotify.link", "spotify.app.link", "deezer.page.link", "link.deezer.com", "dzr.page.link",
+               "amzn.in", "amzn.to", "amzn.eu", "amzn.asia", "a.co",
                "lnk.to", "geo.music.apple.com")
 CANONICAL_RE = re.compile(r"https?://(?:open\.spotify\.com|music\.apple\.com|www\.deezer\.com|deezer\.com|"
                           r"music\.amazon\.[a-z.]+|tidal\.com|listen\.tidal\.com)/[^\s\"'<>\\]+")
@@ -67,8 +76,8 @@ def service_of(url: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------- HTTP helpers (replaced in tests)
-def _get(url: str, timeout: int = 15, accept: str = "text/html,application/json") -> tuple[str, str]:
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept, "Accept-Language": "en"})
+def _get(url: str, timeout: int = 15, accept: str = "text/html,application/json", ua: str = UA) -> tuple[str, str]:
+    req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": accept, "Accept-Language": "en-IN,en;q=0.8"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = r.read(6_000_000)
         charset = r.headers.get_content_charset() or "utf-8"
@@ -224,7 +233,10 @@ def _deezer(url: str) -> Optional[dict]:
 
 def _odesli(url: str) -> Optional[dict]:
     """song.link / Odesli: finds the same song or album on other services, including YouTube."""
-    j = _get_json("https://api.song.link/v1-alpha.1/links?userCountry=IN&url=" + urllib.parse.quote(url, safe=""))
+    if not ODESLI_KEY:
+        return None
+    j = _get_json("https://api.song.link/v1-alpha.1/links?userCountry=IN&key=" + urllib.parse.quote(ODESLI_KEY)
+                  + "&url=" + urllib.parse.quote(url, safe=""))
     e = _dig(j, "entitiesByUniqueId", j.get("entityUniqueId") or "")
     if not e:
         return None
@@ -239,6 +251,10 @@ def _odesli(url: str) -> Optional[dict]:
 
 
 _TITLE_PATTERNS = [
+    r"^(?:Play|Listen to|Stream)\s+(?P<t>.+?) by (?P<a>.+?) on (?:Amazon Music|Apple Music|Deezer|TIDAL|Tidal|Anghami|Boomplay|Pandora)",
+    r"^(?P<t>.+?) by (?P<a>.+?) on Amazon Music(?: Unlimited)?(?:\s*[-|].*)?$",
+    r"^Amazon\.[a-z.]+:\s*(?P<t>.+?)\s*:\s*(?P<a>.+?)\s*:\s*(?:Digital Music|Music|MP3 Downloads)",
+    r"^(?P<t>.+?)\s*:\s*(?P<a>.+?)\s*:\s*Amazon\.[a-z.]+:\s*(?:Digital Music|Music|MP3 Downloads)",
     r"^(?P<t>.+?)\s+-\s+[Ss]ong(?: and lyrics)? by (?P<a>.+?)\s*(?:\||–|-|$)",
     r"^(?P<t>.+?) - (?:Single|EP) by (?P<a>.+?) on Apple Music",
     r"^(?P<t>.+?) by (?P<a>.+?) on (?:Amazon Music|Apple Music|TIDAL|Tidal|Deezer|Anghami|Boomplay|Pandora|Napster|Qobuz)",
@@ -249,36 +265,126 @@ _TITLE_PATTERNS = [
 ]
 
 
-def _from_page(url: str, service: str) -> Optional[dict]:
-    """Last resort: read the song name and artist from the page's title and preview tags."""
-    final, page = _get(url)
-    meta = _meta(page)
-    candidates = [meta.get("og:title"), meta.get("twitter:title"), meta.get("title")]
-    title = artist = ""
-    for c in filter(None, candidates):
+def _ld_artist(by) -> str:
+    if isinstance(by, list):
+        return ", ".join(_dig(x, "name", default="") for x in by if isinstance(x, dict))
+    return _dig(by, "name", default="") if isinstance(by, dict) else str(by or "")
+
+
+def _ld_tracks(d: dict) -> list:
+    """Tracks from schema.org MusicAlbum / MusicPlaylist data (several shapes are used in the wild)."""
+    raw = d.get("track") or d.get("tracks") or []
+    if isinstance(raw, dict):
+        raw = raw.get("itemListElement") or [raw]
+    out = []
+    for r in raw:
+        if isinstance(r, dict) and "item" in r and isinstance(r["item"], dict):
+            r = r["item"]
+        if not isinstance(r, dict):
+            continue
+        t = _track(r.get("name"), _ld_artist(r.get("byArtist")) or _ld_artist(d.get("byArtist")),
+                   d.get("name", "") if d.get("@type") == "MusicAlbum" else "",
+                   _iso_duration(r.get("duration")), r.get("image") if isinstance(r.get("image"), str) else None,
+                   (r.get("url") or r.get("@id") or None))
+        if t:
+            out.append(t)
+    return out
+
+
+def _title_artist(meta: dict) -> tuple[str, str]:
+    for c in filter(None, (meta.get("og:title"), meta.get("twitter:title"), meta.get("title"))):
         for pat in _TITLE_PATTERNS:
             m = re.match(pat, c.strip())
             if m:
-                title, artist = m.group("t"), (m.groupdict().get("a") or "").split(":")[0]
-                break
-        if title:
-            break
-    if not title:
-        title = next((c for c in candidates if c), "")
-        title = re.split(r"\s+[|–]\s+|\s+-\s+(?:song|Single|EP)\b", title)[0]
-        title = re.sub(r"\s+on\s+(?:Amazon Music|Apple Music|Spotify|Deezer|Tidal|Gaana|Wynk Music).*$", "", title)
-        desc = meta.get("og:description") or meta.get("description") or ""
-        a = re.match(r"^(?:Listen to [^,]+(?:,| by) )?(.+?)\s*·", desc)
-        artist = a.group(1) if a else ""
-    for d in _json_ld(page):
-        if d.get("@type") == "MusicRecording":
-            title = d.get("name") or title
-            by = d.get("byArtist")
-            artist = (", ".join(x.get("name", "") for x in by) if isinstance(by, list) else _dig(by, "name", default="")) or artist
-    t = _track(title, artist, "", None, meta.get("og:image"))
-    if not t or t["title"].lower() in (service.lower(), "spotify", "amazon music", "apple music", "web player"):
-        return None
-    return {"service": service, "kind": "track", "title": t["title"], "tracks": [t]}
+                return m.group("t").strip(), (m.groupdict().get("a") or "").split(":")[0].strip()
+    title = next((c for c in (meta.get("og:title"), meta.get("twitter:title"), meta.get("title")) if c), "")
+    title = re.sub(r"^(?:Play|Listen to|Stream)\s+", "", title)
+    title = re.split(r"\s+[|–]\s+|\s+-\s+(?:song|Single|EP)\b", title)[0]
+    title = re.sub(r"\s+on\s+(?:Amazon Music|Apple Music|Spotify|Deezer|Tidal|Gaana|Wynk Music).*$", "", title)
+    desc = meta.get("og:description") or meta.get("description") or ""
+    a = re.match(r"^(?:Listen to [^,]+(?:,| by) )?(.+?)\s*·", desc) or re.search(r"\bby ([^.·|]+?)(?: on | · |\.|$)", desc)
+    return title.strip(), (a.group(1).strip() if a else "")
+
+
+GENERIC_TITLES = {"spotify", "amazon music", "apple music", "web player", "amazon.in", "amazon.com", "deezer",
+                  "amazon music unlimited", "gaana", "wynk music", "jiosaavn", "robot check", "page not found",
+                  "sign in", "amazon.in: amazon music", "access denied", "404"}
+
+
+def _from_page(url: str, service: str, prefer_track: str = "") -> Optional[dict]:
+    """Read the song (or album) name and artist from the page's preview tags and structured data."""
+    last_error = None
+    for ua in PREVIEW_UAS:
+        try:
+            _, page = _get(url, ua=ua)
+        except Exception as e:
+            last_error = e
+            continue
+        meta = _meta(page)
+        # structured data first: it has the exact names, and the whole track list for albums
+        for d in _json_ld(page):
+            kind = d.get("@type")
+            if kind == "MusicRecording" and d.get("name"):
+                t = _track(d.get("name"), _ld_artist(d.get("byArtist")), _dig(d, "inAlbum", "name", default=""),
+                           _iso_duration(d.get("duration")), meta.get("og:image"))
+                if t:
+                    return {"service": service, "kind": "track", "title": t["title"], "tracks": [t]}
+            if kind in ("MusicAlbum", "MusicPlaylist"):
+                tracks = _ld_tracks(d)
+                if prefer_track and tracks:
+                    pick = [t for t in tracks if prefer_track in str(t.get("id") or "")]
+                    if pick:
+                        pick[0]["thumbnail"] = pick[0]["thumbnail"] or meta.get("og:image")
+                        return {"service": service, "kind": "track", "title": pick[0]["title"], "tracks": pick[:1]}
+                if tracks and not prefer_track:
+                    for t in tracks:
+                        t["thumbnail"] = t["thumbnail"] or meta.get("og:image")
+                    return {"service": service, "kind": "collection", "title": d.get("name") or f"{service} album",
+                            "tracks": tracks[:MAX_TRACKS]}
+        title, artist = _title_artist(meta)
+        t = _track(title, artist, "", None, meta.get("og:image"))
+        if t and t["title"].lower() not in GENERIC_TITLES and not t["title"].lower().startswith(("amazon.", "sign in")):
+            return {"service": service, "kind": "track", "title": t["title"], "tracks": [t]}
+    if last_error:
+        raise last_error
+    return None
+
+
+_ASIN = r"(B0[0-9A-Z]{8})"
+
+
+def _amazon(url: str) -> Optional[dict]:
+    """Amazon Music: song pages and album pages with ?trackAsin= (what the app's Share button gives)."""
+    p = urllib.parse.urlsplit(url)
+    q = urllib.parse.parse_qs(p.query)
+    host = (p.hostname or "music.amazon.in").lower()
+    tld = re.sub(r"^(?:www\.)?(?:music\.)?amazon\.", "", host) or "in"
+    track = (q.get("trackAsin") or [None])[0] or (re.search(r"/tracks/" + _ASIN, p.path) or [None, None])[1]
+    album = (re.search(r"/albums/" + _ASIN, p.path) or [None, None])[1]
+    playlist = (re.search(r"/(?:user-)?playlists/([A-Za-z0-9]+)", p.path) or [None, None])[1]
+    pages = []
+    if track:
+        pages += [f"https://music.amazon.{tld}/tracks/{track}"]
+        if album:
+            pages += [f"https://music.amazon.{tld}/albums/{album}?trackAsin={track}"]
+        pages += [f"https://music.amazon.com/tracks/{track}", f"https://www.amazon.{tld}/dp/{track}"]
+    elif album:
+        pages += [f"https://music.amazon.{tld}/albums/{album}", f"https://music.amazon.com/albums/{album}",
+                  f"https://www.amazon.{tld}/dp/{album}"]
+    elif playlist:
+        pages += [url]
+    else:
+        pages += [url]
+    for page in pages:
+        try:
+            r = _from_page(page, "Amazon Music", prefer_track=track or "")
+        except Exception:
+            continue
+        if r and r.get("tracks"):
+            if track and r["kind"] != "track":
+                continue
+            return r
+    return None
 
 
 def _expand(url: str) -> str:
@@ -308,7 +414,7 @@ def resolve(url: str) -> dict:
     url = _clean(_expand(url.strip()))
     service = service_of(url) or "Music link"
     result, errors = None, []
-    handlers = {"Spotify": _spotify, "Apple Music": _apple, "Deezer": _deezer}
+    handlers = {"Spotify": _spotify, "Apple Music": _apple, "Deezer": _deezer, "Amazon Music": _amazon}
     for step in ([handlers[service]] if service in handlers else []) + [_odesli, lambda u: _from_page(u, service)]:
         try:
             result = step(url)
@@ -318,8 +424,8 @@ def resolve(url: str) -> dict:
         if result and (result.get("tracks") or result.get("kind") == "youtube_playlist"):
             break
     if not result or not (result.get("tracks") or result.get("kind") == "youtube_playlist"):
-        raise LinkError(f"Couldn't read that {service} link. Open the song in the app, tap Share → Copy link, "
-                        "and paste that. Private playlists can't be read.")
+        raise LinkError(f"Couldn't read that {service} link. Check your internet connection, then open the song in "
+                        f"{service}, tap Share → Copy link and paste that. Private playlists can't be read.")
     result["service"] = service
     # one song without an exact YouTube match yet: ask song.link for it (best match available)
     if result["kind"] == "track" and not result["tracks"][0].get("youtube") and service != "Song link":

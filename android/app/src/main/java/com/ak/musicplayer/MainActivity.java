@@ -49,7 +49,7 @@ import java.util.regex.Pattern;
  */
 public class MainActivity extends Activity {
 
-    public static final String VERSION = "2.2.0";
+    public static final String VERSION = "2.3.0";
     static final String LOADING_URL = "file:///android_asset/loading.html";
 
     private static final int REQ_FILE = 11;
@@ -445,6 +445,7 @@ public class MainActivity extends Activity {
                     o.put("error", engineError);
                 } else {
                     o.put("state", base != null ? "ready" : "starting");
+                    if (base == null) o.put("stage", ServerManager.stage());
                 }
                 return o.toString();
             } catch (Exception e) {
@@ -566,6 +567,9 @@ public class MainActivity extends Activity {
                 i.putExtra("artist", o.optString("artist"));
                 i.putExtra("cover", o.optString("cover"));
                 i.putExtra("playing", playing);
+                i.putExtra("duration", o.optLong("duration", 0));
+                i.putExtra("position", o.optLong("position", 0));
+                i.putExtra("rate", (float) o.optDouble("rate", 1));
                 if (PlaybackService.running) {
                     startService(i);
                 } else if (playing) {

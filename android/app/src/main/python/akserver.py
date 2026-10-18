@@ -24,6 +24,7 @@ _server = None
 _thread = None
 _port = 0
 _error = ""
+_stage = "starting"
 
 
 def _works(cmd):
@@ -38,6 +39,45 @@ def _works(cmd):
         return False, f"stopped by Android (signal {-r.returncode})"
     err = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
     return False, f"exit code {r.returncode}" + (f": {err[-1][:160]}" if err else "")
+
+
+def _tool_key(bin_dir):
+    """Changes whenever the app is updated (the tools' real files move/change)."""
+    parts = []
+    for name in ("ffmpeg", "ffprobe", "qjs"):
+        p = os.path.join(bin_dir, name)
+        try:
+            real = os.path.realpath(p)
+            st = os.stat(real)
+            parts.append(f"{name}:{real}:{st.st_size}:{int(st.st_mtime)}")
+        except OSError:
+            parts.append(f"{name}:-")
+    return "|".join(parts)
+
+
+def _check_tools_cached(bin_dir, files_dir):
+    """Test the tools once per app version (3 programs started on every launch is slow on budget phones)."""
+    cache = os.path.join(files_dir, "tools.json")
+    key = _tool_key(bin_dir)
+    try:
+        with open(cache) as f:
+            saved = json.load(f)
+        if saved.get("key") == key:
+            status = saved["status"]
+            for name, st in status.items():              # links are recreated on every start: drop broken ones again
+                p = os.path.join(bin_dir, name)
+                if not st.get("ok") and os.path.lexists(p):
+                    os.remove(p)
+            return status
+    except (OSError, ValueError, KeyError):
+        pass
+    status = _check_tools(bin_dir)
+    try:
+        with open(cache, "w") as f:
+            json.dump({"key": key, "status": status}, f)
+    except OSError:
+        pass
+    return status
 
 
 def _check_tools(bin_dir):
@@ -184,12 +224,32 @@ def _run():
         _error = traceback.format_exc()
 
 
+def _bundled_ytdlp_version():
+    """yt-dlp's version, read from its version.py without importing it (importing loads ~70 modules)."""
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("yt_dlp")
+        path = os.path.join(list(spec.submodule_search_locations)[0], "version.py")
+        try:
+            src = spec.loader.get_data(path).decode()
+        except Exception:
+            with open(path, encoding="utf-8") as f:
+                src = f.read()
+        for line in src.splitlines():
+            if line.startswith("__version__"):
+                return line.split("=", 1)[1].strip().strip("'\"")
+    except Exception:
+        pass
+    return "0"
+
+
 def start(files_dir, cache_dir, bin_dir, preferred_port=8765, native_dir=""):
     """Start the server in a background thread (once) and return its port."""
-    global _server, _thread, _port, _error
+    global _server, _thread, _port, _error, _stage
     if _thread is not None and _thread.is_alive():
         return _port
     _error = ""
+    t0 = time.time()
 
     here = os.path.dirname(os.path.abspath(__file__))
     os.makedirs(cache_dir, exist_ok=True)
@@ -203,6 +263,7 @@ def start(files_dir, cache_dir, bin_dir, preferred_port=8765, native_dir=""):
         "HOME": files_dir,
         "PATH": bin_dir + os.pathsep + os.environ.get("PATH", "/system/bin"),
     })
+    _stage = "Preparing the audio tools…"
     try:
         lib_dir = _unpack_ffmpeg_libs(native_dir, files_dir)
     except Exception as e:
@@ -212,24 +273,18 @@ def start(files_dir, cache_dir, bin_dir, preferred_port=8765, native_dir=""):
         old = os.environ.get("LD_LIBRARY_PATH", "")
         os.environ["LD_LIBRARY_PATH"] = lib_dir + (os.pathsep + old if old else "")
     tempfile.tempdir = cache_dir
-    tools = _check_tools(bin_dir)
+    tools = _check_tools_cached(bin_dir, files_dir)
     os.environ["AK_TOOLS"] = json.dumps(tools)
     print("AK Music Player tools: " + ", ".join(f"{k}={'ok' if v['ok'] else v['error']}" for k, v in tools.items()),
           file=sys.stderr)
 
-    try:
-        from yt_dlp.version import __version__ as bundled
-    except Exception:
-        bundled = "0"
-    # (yt_dlp.version only reads a constant; nothing else of yt-dlp is imported yet)
-    for mod in [m for m in sys.modules if m == "yt_dlp" or m.startswith("yt_dlp.")]:
-        del sys.modules[mod]
+    bundled = _bundled_ytdlp_version()
     updated = _use_updated_ytdlp(files_dir, bundled)
 
-    import app      # backend/app.py
+    _stage = "Loading the player…"
+    import app      # backend/app.py (yt-dlp itself loads later, in the background)
     import uvicorn
-    import yt_dlp
-    print(f"AK Music Player: yt-dlp {yt_dlp.version.__version__}" + (" (self-updated)" if updated else ""), file=sys.stderr)
+    print(f"AK Music Player: yt-dlp {updated or bundled}" + (" (self-updated)" if updated else ""), file=sys.stderr)
 
     _port = _free_port(int(preferred_port))
     config = uvicorn.Config(app.app, host="127.0.0.1", port=_port, log_level="warning", access_log=False,
@@ -237,9 +292,20 @@ def start(files_dir, cache_dir, bin_dir, preferred_port=8765, native_dir=""):
     _server = uvicorn.Server(config)
     _thread = threading.Thread(target=_run, name="ak-music-server", daemon=True)
     _thread.start()
-    threading.Thread(target=lambda: (time.sleep(30), _update_ytdlp(files_dir, yt_dlp.version.__version__)),
-                     name="ak-ytdlp-update", daemon=True).start()
+    _stage = "Opening…"
+    print(f"AK Music Player: engine ready in {time.time() - t0:.1f}s", file=sys.stderr)
+
+    def background():
+        time.sleep(1.5)                  # let the player screen load first
+        app.warm_up()                    # load yt-dlp so the first link opens quickly
+        time.sleep(30)
+        _update_ytdlp(files_dir, app.ytdlp_version())
+    threading.Thread(target=background, name="ak-background", daemon=True).start()
     return _port
+
+
+def stage():
+    return _stage
 
 
 def error():

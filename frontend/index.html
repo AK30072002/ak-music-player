@@ -41,9 +41,9 @@
   <!-- ============ Main ============ -->
   <main class="main" id="main">
     <header class="topbar">
-      <form class="paste" id="pasteForm" data-paste autocomplete="off">
+      <form class="paste" id="pasteForm" data-paste autocomplete="off" novalidate>
         <i data-icon="link"></i>
-        <input id="pasteInput" type="url" inputmode="url" placeholder="Paste a YouTube, Instagram, Spotify… link" aria-label="Link to play">
+        <input id="pasteInput" class="link-in" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="Paste a YouTube, Instagram, Spotify… link" aria-label="Link to play">
         <button type="button" class="ghost-btn" id="clipBtn" title="Paste from clipboard">Paste</button>
         <button type="submit" class="primary-btn" id="pasteGo">Play</button>
       </form>

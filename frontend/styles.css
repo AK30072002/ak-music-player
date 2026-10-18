@@ -499,3 +499,11 @@ input.time:focus, .text-in:focus { border-color: var(--accent); }
 .editor input[type="range"]::-webkit-slider-thumb, .combine input[type="range"]::-webkit-slider-thumb { opacity: 1; width: 20px; height: 20px; margin-top: -8px; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
 .editor input[type="range"]::-moz-range-thumb, .combine input[type="range"]::-moz-range-thumb { width: 20px; height: 20px; background: var(--accent); }
 .combine input[type="range"]:disabled { opacity: .4; }
+
+/* recent problems (Settings) */
+.problems { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.problem { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font-size: 14px; }
+.pr-head { display: flex; justify-content: space-between; gap: 10px; }
+.pr-head b { text-transform: capitalize; }
+.pr-head span, .pr-song { color: var(--faint); font-size: 13px; }
+.pr-msg { color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }

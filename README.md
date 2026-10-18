@@ -35,7 +35,8 @@ Everything runs on your phone. Install the app and start playing: no computer an
 - **Play a link:** copy a link in YouTube, Instagram or any other app, then paste it into the bar at the top and tap **Play**.
 - **Share to the app:** in YouTube, Instagram, Spotify or any music app tap **Share → AK Music Player**. It starts playing straight away.
 - **Spotify, Apple Music, Amazon Music and others:** these apps lock their audio, so AK Music Player reads the song's name, artist and length from the link and plays the same song from YouTube, keeping the original title and artwork. Playlists and albums import as AK Music Player playlists.
-- **Trim a song:** tap **⋯ → Edit / trim song**. Drag the sliders or type exact times (for example start at 0:10 to turn a 4:00 song into 3:50), add cuts to remove parts from the middle, add fades, preview, then **Save as new song**. Your original stays untouched.
+- **Trim a song:** tap **⋯ → Edit / trim song**. Drag the sliders or type exact times (for example start at 0:10 to turn a 4:00 song into 3:50), add cuts to remove parts from the middle, add fades, preview, then **Save as new song**. With **Replace the original** on (the default) only the edited version is kept, in the same playlist spots with its likes and plays; for songs stored on your phone, the edited version is saved to Downloads/AK Music Player and Android asks you before deleting the original file. Turn it off to keep both.
+- **Links inside shared text:** pasting "Check out this song! https://…" works; the app finds the link inside.
 - **Combine songs:** **Library → Combine songs** (or **⋯ → Combine with other songs**). Add songs, put them in order, choose a crossfade or a gap, and create one new song.
 - **Songs on your phone:** the **Phone** tab shows every song and audio file stored on the phone. Play them, add them to playlists, trim or combine them, or delete them permanently (tap **Select** to delete many at once; Android asks you to confirm).
 - **Playlists:** tap **⋯** on any song → **Add to playlist**. Paste a YouTube or SoundCloud *playlist* link to import the whole thing.
@@ -47,7 +48,7 @@ Everything runs on your phone. Install the app and start playing: no computer an
 | Area | What you can do |
 |---|---|
 | **Play from links** | YouTube, YouTube Music, Instagram reels, JioSaavn, SoundCloud, TikTok, Vimeo, Bandcamp, Facebook, X and 1,000+ more |
-| **Music apps** | Spotify, Apple Music, Amazon Music, Deezer, Tidal, Gaana, Wynk, Hungama, Resso, Boomplay, Anghami, Shazam, Pandora, Napster, Qobuz, Yandex Music and song.link: songs, albums and public playlists, matched to the same song on YouTube |
+| **Music apps** | Spotify, Apple Music, Amazon Music, Deezer, Tidal, Gaana, Wynk, Hungama, Resso, Boomplay, Anghami, Shazam, Pandora, Napster, Qobuz and Yandex Music: songs, albums and public playlists, matched to the same song on YouTube |
 | **Song editor** *(new in 2.0)* | Trim the start and end with sliders or exact times, cut any number of parts out of the middle, fade in/out, see exactly how much is removed, preview, save as a new song |
 | **Combine songs** *(new in 2.0)* | Join up to 30 songs into one, in any order, with a crossfade or a gap between them |
 | **On this phone** *(new in 2.0)* | See every song and audio file on the phone, search and sort them by folder, size or length, play, edit, add to playlists, and delete permanently |
@@ -64,6 +65,17 @@ Everything runs on your phone. Install the app and start playing: no computer an
 | **Always up to date** | The app updates its downloader by itself once a day, so it keeps working when sites change |
 | **Looks** | Dark and light themes, spinning-record player with a live visualizer |
 
+## What's new in 2.3.0
+
+- **Starts faster:** the music engine no longer loads its YouTube downloader before the player opens (it loads in the background), and tool checks run only once per app version. The loading screen shows what it's doing.
+- **Long songs play reliably:** downloads finish in a private folder and are checked before playing, so the player never opens a half-downloaded file. If a song still won't load, the app repairs it automatically and resumes where it was.
+- **Notification shows the time and progress,** and you can drag it to seek (also on the lock screen and in the car).
+- **Amazon Music links work again** (song.link stopped free access in October 2026; the app now reads Amazon's own page details).
+- **Instagram share links** (`instagram.com/share/…`) and Facebook `fb.watch` links work; Instagram posts that need a login now offer **Sign in** instead of saying "not available".
+- **Pasting shared text** like "Check out … https://…" works everywhere.
+- **Editing replaces the original** (you can switch it off).
+- **Settings → Recent problems** lists what went wrong, for reporting.
+
 ## Troubleshooting
 
 **A link says "needs you to be signed in"**
@@ -77,6 +89,9 @@ The app picks the closest match on YouTube by name and length. If it's wrong, ta
 
 **A Spotify playlist won't import**
 Only public playlists can be read. In Spotify, make the playlist public, or share the songs one by one.
+
+**Something doesn't work**
+Open **Settings → Recent problems** and take a screenshot; it shows exactly what failed.
 
 **A YouTube or Instagram link stopped working**
 Sites change often. The app updates its downloader by itself once a day: close the app completely (swipe it away), wait a minute, and open it again. If it still fails, install the newest APK from the releases page.
@@ -130,4 +145,4 @@ AK Music Player is a personal tool. Only download what you have the right to sav
 
 Made by **AJAIKRISHNA**. © 2026 AJAIKRISHNA. All rights reserved.
 
-Built with [Chaquopy](https://chaquo.com/chaquopy/) (MIT), [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense), [FFmpeg](https://ffmpeg.org) 7.1 built for Android by the [youtubedl-android](https://github.com/yausername/youtubedl-android) project (GPL-3.0; build instructions in its BUILD_FFMPEG.md), [QuickJS-ng](https://github.com/quickjs-ng/quickjs) (MIT), [FastAPI](https://fastapi.tiangolo.com) (MIT), lyrics from [LRCLIB](https://lrclib.net), and song matching help from [Odesli / song.link](https://odesli.co), Apple's iTunes Search API and Deezer's public API. Notification icons from Google's Material Icons (Apache 2.0).
+Built with [Chaquopy](https://chaquo.com/chaquopy/) (MIT), [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense), [FFmpeg](https://ffmpeg.org) 7.1 built for Android by the [youtubedl-android](https://github.com/yausername/youtubedl-android) project (GPL-3.0; build instructions in its BUILD_FFMPEG.md), [QuickJS-ng](https://github.com/quickjs-ng/quickjs) (MIT), [FastAPI](https://fastapi.tiangolo.com) (MIT), lyrics from [LRCLIB](https://lrclib.net), and song details from Apple's iTunes Search API, Deezer's public API and the services' own link previews. Notification icons from Google's Material Icons (Apache 2.0).

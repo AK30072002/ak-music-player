@@ -45,6 +45,16 @@ final class ServerManager {
                 libDir).toInt();
     }
 
+    /** What the engine is doing right now, for the loading screen. */
+    static String stage() {
+        try {
+            if (!Python.isStarted()) return "Starting the music engine\u2026";
+            return Python.getInstance().getModule("akserver").callAttr("stage").toString();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
     /** Error text if the engine thread crashed, otherwise "". */
     static String error() {
         try {

@@ -19,6 +19,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -49,6 +50,8 @@ public class PlaybackService extends Service {
     private String artist = "";
     private String coverUrl = "";
     private boolean playing = false;
+    private long durationMs = 0, positionMs = 0;
+    private float rate = 1f;
     private Bitmap art;
 
     @Override
@@ -68,6 +71,11 @@ public class PlaybackService extends Service {
             @Override public void onSkipToNext() { send("next"); }
             @Override public void onSkipToPrevious() { send("prev"); }
             @Override public void onStop() { send("pause"); }
+            @Override public void onSeekTo(long pos) {
+                positionMs = Math.max(0, pos);
+                MainActivity.runJs("window.akCommand && window.akCommand('seek', " + positionMs + ")");
+                refresh();
+            }
         });
         session.setActive(true);
 
@@ -94,6 +102,10 @@ public class PlaybackService extends Service {
             title = nz(intent.getStringExtra("title"));
             artist = nz(intent.getStringExtra("artist"));
             playing = intent.getBooleanExtra("playing", false);
+            durationMs = Math.max(0, intent.getLongExtra("duration", 0));
+            positionMs = Math.max(0, intent.getLongExtra("position", 0));
+            rate = intent.getFloatExtra("rate", 1f);
+            if (rate <= 0) rate = 1f;
             String cover = nz(intent.getStringExtra("cover"));
             if (!cover.equals(coverUrl)) {
                 coverUrl = cover;
@@ -158,14 +170,17 @@ public class PlaybackService extends Service {
         MediaMetadata.Builder meta = new MediaMetadata.Builder()
                 .putString(MediaMetadata.METADATA_KEY_TITLE, title)
                 .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
-                .putString(MediaMetadata.METADATA_KEY_ALBUM, "AK Music Player");
+                .putString(MediaMetadata.METADATA_KEY_ALBUM, "AK Music Player")
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs > 0 ? durationMs : -1);
         if (art != null) meta.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art);
         session.setMetadata(meta.build());
         session.setPlaybackState(new PlaybackState.Builder()
                 .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE | PlaybackState.ACTION_PLAY_PAUSE
-                        | PlaybackState.ACTION_SKIP_TO_NEXT | PlaybackState.ACTION_SKIP_TO_PREVIOUS | PlaybackState.ACTION_STOP)
+                        | PlaybackState.ACTION_SKIP_TO_NEXT | PlaybackState.ACTION_SKIP_TO_PREVIOUS | PlaybackState.ACTION_STOP
+                        | PlaybackState.ACTION_SEEK_TO)
+                // position + speed + "now": Android moves the progress bar and the times by itself
                 .setState(playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
-                        PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1f)
+                        positionMs, playing ? rate : 0f, SystemClock.elapsedRealtime())
                 .build());
 
         Intent open = new Intent(this, MainActivity.class);

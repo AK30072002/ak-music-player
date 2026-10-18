@@ -27,7 +27,49 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-import yt_dlp
+
+class _LazyYtDlp:
+    """yt-dlp is loaded the first time it's needed (or by the warm-up after start), not at app start:
+    loading its ~100 modules takes seconds on a budget phone, and the player can show before that."""
+    _mod = None
+    _lock = threading.Lock()
+
+    def __getattr__(self, name):
+        if _LazyYtDlp._mod is None:
+            with _LazyYtDlp._lock:
+                if _LazyYtDlp._mod is None:
+                    import yt_dlp as m
+                    _LazyYtDlp._mod = m
+        return getattr(_LazyYtDlp._mod, name)
+
+
+yt_dlp = _LazyYtDlp()
+
+
+def ytdlp_version() -> str:
+    """yt-dlp's version without loading yt-dlp."""
+    if _LazyYtDlp._mod is not None:
+        return _LazyYtDlp._mod.version.__version__
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("yt_dlp")           # finds the package without importing it
+        path = os.path.join(list(spec.submodule_search_locations)[0], "version.py")
+        try:
+            src = spec.loader.get_data(path).decode()
+        except Exception:
+            src = open(path, encoding="utf-8").read()
+        m = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)", src, re.M)
+        return m.group(1) if m else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def warm_up():
+    """Load yt-dlp in the background right after start, so the first link opens quickly."""
+    try:
+        yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}).close()
+    except Exception:
+        pass
 
 import musiclinks
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -53,7 +95,7 @@ MP3_BITRATE = os.environ.get("AK_MP3_BITRATE", "320k")
 ON_ANDROID = os.environ.get("AK_PLATFORM") == "android"   # running inside the Android app
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 HAS_FFPROBE = shutil.which("ffprobe") is not None
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 
 AUDIO_TYPES = {
@@ -221,6 +263,41 @@ def split_title(info: dict) -> tuple[str, str]:
     return title, artist
 
 
+_LINK_RE = re.compile(r"https?://[^\s<>\"'“”‘’]+", re.I)
+_BARE_LINK_RE = re.compile(r"(?:^|[\s(])((?:www\.|m\.|music\.|open\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\."
+                           r"(?:com|in|be|link|to|app|co|net|org|me|fm|io|watch)/[^\s<>\"'“”‘’]*)", re.I)
+
+
+def extract_link(text: str) -> Optional[str]:
+    """The link inside shared text like "Check out this song! https://…" (also without https://)."""
+    t = re.sub(r"[\u200b-\u200d\ufeff]", " ", text or "").strip()
+    m = _LINK_RE.search(t)
+    url = m.group(0) if m else None
+    if not url:
+        m = _BARE_LINK_RE.search(t)
+        url = "https://" + m.group(1) if m else None
+    return re.sub(r"[)\].,;:!?…»。、]+$", "", url) if url else None
+
+
+# links that only redirect to the real page (yt-dlp can't read them directly)
+_REDIRECT_LINKS = re.compile(r"^https?://(?:www\.)?(?:instagram\.com/share/|fb\.watch/|facebook\.com/share/|"
+                             r"pin\.it/|amzn\.(?:in|to|eu|asia)/|a\.co/)", re.I)
+
+
+def expand_share_link(url: str) -> str:
+    if not _REDIRECT_LINKS.match(url):
+        return url
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            final = r.geturl()
+        if final and final.startswith("http") and "/accounts/login" not in final:
+            return final
+    except Exception:
+        pass
+    return url
+
+
 def upsert_track(con, info: dict, source_url: str) -> dict:
     extractor = info.get("extractor_key") or info.get("ie_key") or info.get("extractor") or "generic"
     vid = info.get("id") or uuid.uuid5(uuid.NAMESPACE_URL, source_url).hex
@@ -317,27 +394,13 @@ def ensure_audio(tid: str) -> Path:
                 with db() as con:
                     con.execute("UPDATE tracks SET status='error', error=? WHERE id=?", (e.detail, tid))
                 raise
-        opts = ydl_base_opts()
-        opts.update({
-            "format": "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best",
-            "outtmpl": str(AUDIO_DIR / f"{tid}.%(ext)s"),
-        })
-        if HAS_FFMPEG:
-            # keeps the original audio stream (no re-encode) and drops any video
-            opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}]
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(source, download=True)
-        except Exception as e:
-            msg = clean_err(e)
+            path, info = _download_audio(tid, source)
+        except HTTPException as e:
             with db() as con:
-                con.execute("UPDATE tracks SET status='error', error=? WHERE id=?", (msg, tid))
-            raise HTTPException(502, msg)
-        path = find_audio(tid)
-        if not path:
-            with db() as con:
-                con.execute("UPDATE tracks SET status='error', error='No playable audio found' WHERE id=?", (tid,))
-            raise HTTPException(502, "No playable audio found in that link")
+                con.execute("UPDATE tracks SET status='error', error=? WHERE id=?", (e.detail, tid))
+            log_problem("download", e.detail, t["title"])
+            raise
         dur = (info or {}).get("duration") or t["duration"] or probe_duration(path)
         with db() as con:
             con.execute("UPDATE tracks SET status='ready', error=NULL, file=?, duration=? WHERE id=?",
@@ -407,24 +470,102 @@ def find_youtube(query: str, duration: Optional[float] = None) -> str:
     return best.get("url") if str(best.get("url", "")).startswith("http") else f"https://www.youtube.com/watch?v={best['id']}"
 
 
+PROBLEMS: "list[dict]" = []
+
+
+def log_problem(where: str, message: str, song: str = ""):
+    """Recent problems, shown in Settings so they can be screenshotted and reported."""
+    PROBLEMS.append({"time": time.time(), "where": where, "message": str(message)[:500], "song": song or ""})
+    del PROBLEMS[:-40]
+
+
 def clean_err(e: Exception) -> str:
     msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e))
     msg = msg.replace("ERROR: ", "").strip()
     low = msg.lower()
+    youtube = "[youtube" in low
+    if youtube and ("not a bot" in low or "confirm you" in low and "bot" in low):
+        return ("YouTube asked to confirm you're not a robot. Wait a few minutes and try again, or switch between "
+                "Wi-Fi and mobile data. (The app updates its YouTube support every day.)")
+    if youtube and ("age" in low and ("confirm" in low or "restricted" in low or "inappropriate" in low)):
+        return "This YouTube video is age-restricted, so it can't be played without a YouTube account."
     if "unsupported url" in low:
         return "That link isn't supported. Paste a link to a song, video, reel or playlist page."
-    if any(k in low for k in ("failed to establish", "unable to download webpage", "getaddrinfo",
-                              "name or service not known", "timed out", "network is unreachable")):
-        return "Couldn't reach that site. Check the link and your internet connection, then try again."
-    if "private" in low and "video" in low:
-        return "That video is private, so it can't be played."
-    if "not available" in low or "unavailable" in low:
-        return "That video isn't available (it may be removed, private or blocked in your country)."
-    if "login" in low or "cookies" in low or "rate-limit" in low or "sign in" in low:
+    if "private" in low and ("video" in low or "account" in low):
+        return "That post or video is private, so it can't be played."
+    # sites that need a login (Instagram says "not available, rate-limit reached or login required")
+    if "login" in low or "log in" in low or "cookies" in low or "rate-limit" in low or "sign in" in low:
         return ("This post needs you to be signed in to the site. "
                 + ("Sign in under Settings → Accounts, then try again." if ON_ANDROID
                    else "Set AK_COOKIES to a cookies.txt file (see README)."))
+    if "http error 403" in low or "forbidden" in low:
+        return ("The site refused the download. Try again in a minute; if it keeps happening, the app will pick up "
+                "a fix with its daily update.")
+    if "http error 404" in low or "not found" in low:
+        return "Nothing was found at that link. It may have been removed. Check the link and try again."
+    if any(k in low for k in ("failed to establish", "unable to download webpage", "getaddrinfo",
+                              "name or service not known", "timed out", "network is unreachable", "connection reset")):
+        return "Couldn't reach that site. Check the link and your internet connection, then try again."
+    if "not available" in low or "unavailable" in low:
+        return "That video isn't available (it may be removed, private or blocked in your country)."
     return msg[:400]
+
+
+FORMAT_BEST = "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best"
+FORMAT_SAFE = "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/18/bestaudio/best"   # 18 = MP4 with AAC, plays everywhere
+
+
+def _download_audio(tid: str, source: str, fmt: str = FORMAT_BEST) -> tuple[Path, dict]:
+    """Download into a private folder, check the result, then move it into place in one step.
+    The player never sees a half-downloaded or half-converted file."""
+    work = AUDIO_DIR / f".dl-{tid}"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    try:
+        opts = ydl_base_opts()
+        opts.update({"format": fmt, "outtmpl": str(work / "audio.%(ext)s")})
+        if HAS_FFMPEG:
+            # keeps the original audio stream (no re-encode) and drops any video
+            opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}]
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(source, download=True) or {}
+        except Exception as e:
+            raise HTTPException(502, clean_err(e))
+        files = [p for p in work.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_TYPES and not p.name.endswith(".part")]
+        if not files:
+            raise HTTPException(502, "No playable audio found in that link")
+        got = max(files, key=lambda p: p.stat().st_size)
+        problem = check_audio_file(got, info.get("duration"))
+        if problem:
+            raise HTTPException(502, problem)
+        for old in AUDIO_DIR.glob(f"{tid}.*"):
+            old.unlink(missing_ok=True)
+        final = AUDIO_DIR / f"{tid}{got.suffix.lower()}"
+        os.replace(got, final)
+        return final, info
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def check_audio_file(path: Path, expected: Optional[float] = None) -> Optional[str]:
+    """None if the file looks like complete, playable audio; otherwise what's wrong."""
+    size = path.stat().st_size if path.exists() else 0
+    if size < 16 * 1024:
+        return "The downloaded audio was empty or cut off. Please try again."
+    if HAS_FFMPEG:
+        d = probe_duration(path)
+        if not d or d < 0.5:
+            return "The downloaded audio couldn't be read. Please try again."
+        if expected and expected > 30 and d < expected * 0.8:
+            return f"The download stopped early ({int(d)} of {int(expected)} seconds). Please try again."
+    return None
+
+
+def transcode_compatible(src: Path, dst: Path):
+    """Re-encode to plain AAC in an MP4 file with the index at the front: the format every phone plays."""
+    _run_ffmpeg(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-map", "0:a:0", "-vn", "-c:a", "aac", "-b:a", "192k",
+                 "-ac", "2", "-movflags", "+faststart", str(dst)])
 
 
 def range_response(request: Request, path: Path, media_type: str, filename: Optional[str] = None):
@@ -554,18 +695,17 @@ def health():
     return {"ok": True, "app": "ak-music-player", "version": APP_VERSION, "ffmpeg": HAS_FFMPEG,
             "android": ON_ANDROID, "formats": ["mp3", "m4a", "flac", "original"] if HAS_FFMPEG else ["original"],
             "editing": HAS_FFMPEG, "tools": json.loads(os.environ.get("AK_TOOLS", "{}")),
-            "yt_dlp": yt_dlp.version.__version__, "js_runtime": next(iter(JS_RUNTIMES), None),
+            "yt_dlp": ytdlp_version(), "js_runtime": next(iter(JS_RUNTIMES), None),
             "cookies": bool(COOKIES_BROWSER or (COOKIES_FILE and Path(COOKIES_FILE).exists()))}
 
 
 # ---------- adding links
 @app.post("/api/add")
 def add_link(body: AddLink):
-    url = body.url.strip()
-    m = re.search(r"https?://\S+", url)
-    if not m:
-        raise HTTPException(400, "That doesn't look like a link. Paste a full URL starting with http.")
-    url = m.group(0)
+    url = extract_link(body.url)
+    if not url:
+        raise HTTPException(400, "There's no link in what you pasted. Copy the link from the app's Share button and paste it here.")
+    url = expand_share_link(url)
     if musiclinks.service_of(url):
         return _add_music_link(body, url)
     opts = ydl_base_opts()
@@ -574,7 +714,9 @@ def add_link(body: AddLink):
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
-        raise HTTPException(422, clean_err(e))
+        msg = clean_err(e)
+        log_problem("link", f"{msg} ({url[:120]})")
+        raise HTTPException(422, msg)
     if not info:
         raise HTTPException(422, "Nothing playable found at that link")
 
@@ -614,6 +756,7 @@ def _add_music_link(body: AddLink, url: str) -> dict:
     try:
         res = musiclinks.resolve(url)
     except musiclinks.LinkError as e:
+        log_problem("music link", f"{e} ({url[:120]})")
         raise HTTPException(422, str(e))
     service = res["service"]
     if res["kind"] == "youtube_playlist":        # the whole album exists on YouTube Music
@@ -784,6 +927,118 @@ def download(tid: str, request: Request, format: str = "mp3"):
         raise HTTPException(404, "Track not found")
     path, mtype = build_export(t, format)
     return range_response(request, path, mtype, filename=nice_filename(t, path.suffix))
+
+
+@app.post("/api/tracks/{tid}/repair")
+def repair(tid: str):
+    """A song that won't play: re-download it (once) and convert it to the most compatible format."""
+    with db() as con:
+        t = con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
+    if not t:
+        raise HTTPException(404, "Track not found")
+    with lock_for(tid):
+        for folder in (EXPORT_DIR, WAVE_DIR):
+            for f in folder.glob(f"{tid}*"):
+                f.unlink(missing_ok=True)
+        phone = bool(t["file"]) and os.path.isabs(t["file"])
+        src = Path(t["file"]) if phone else find_audio(tid)
+        if not phone:                                  # a fresh download fixes damaged or cut-off files
+            source = t["source_url"]
+            if source.startswith(("upload://", "edit://", "mix://")):
+                if not src:
+                    raise HTTPException(404, "This song's file is missing")
+            else:
+                if source.startswith(MUSIC_SEARCH):
+                    q = urllib.parse.parse_qs(source[len(MUSIC_SEARCH):])
+                    want = (q.get("d") or [""])[0]
+                    source = find_youtube((q.get("q") or [""])[0], float(want) if want else None)
+                try:
+                    src, _ = _download_audio(tid, source, FORMAT_SAFE)
+                except HTTPException as e:
+                    log_problem("repair", e.detail, t["title"])
+                    raise
+        if HAS_FFMPEG and src and src.exists():
+            tmp = AUDIO_DIR / f".fix-{tid}.m4a"
+            try:
+                try:
+                    transcode_compatible(src, tmp)
+                except HTTPException:
+                    if phone or t["source_url"].startswith(("upload://", "edit://", "mix://")):
+                        raise HTTPException(422, "This song's file is damaged, and there's no link to download it "
+                                                 "again. Remove it and add the file again.")
+                    raise
+                for old in AUDIO_DIR.glob(f"{tid}.*"):
+                    old.unlink(missing_ok=True)
+                final = AUDIO_DIR / f"{tid}.m4a"
+                os.replace(tmp, final)
+                with db() as con:
+                    con.execute("UPDATE tracks SET status='ready', error=NULL, file=? WHERE id=?", (final.name, tid))
+            finally:
+                tmp.unlink(missing_ok=True)
+        else:
+            with db() as con:
+                con.execute("UPDATE tracks SET status='ready', error=NULL WHERE id=?", (tid,))
+    return get_track(tid)
+
+
+class ReplaceIn(BaseModel):
+    original_id: str
+
+
+@app.post("/api/tracks/{tid}/replace-original")
+def replace_original(tid: str, body: ReplaceIn):
+    """After an edit: the edited song takes the original's place (likes, plays, history, playlist spots),
+    and the original leaves the library. A song stored on the phone itself is not deleted here: the app
+    asks Android, which shows its own confirmation."""
+    if tid == body.original_id:
+        raise HTTPException(400, "That's the same song")
+    with db() as con:
+        new = con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
+        old = con.execute("SELECT * FROM tracks WHERE id=?", (body.original_id,)).fetchone()
+        if not new or not old:
+            raise HTTPException(404, "Track not found")
+        con.execute("""UPDATE tracks SET liked=?, liked_at=?, play_count=play_count+?, last_played=COALESCE(?, last_played)
+                       WHERE id=?""", (old["liked"], old["liked_at"], old["play_count"] or 0, old["last_played"], tid))
+        for r in con.execute("SELECT playlist_id FROM playlist_tracks WHERE track_id=?", (old["id"],)).fetchall():
+            has_new = con.execute("SELECT 1 FROM playlist_tracks WHERE playlist_id=? AND track_id=?",
+                                  (r["playlist_id"], tid)).fetchone()
+            if has_new:
+                con.execute("DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id=?", (r["playlist_id"], old["id"]))
+            else:
+                con.execute("UPDATE playlist_tracks SET track_id=? WHERE playlist_id=? AND track_id=?",
+                            (tid, r["playlist_id"], old["id"]))
+        con.execute("UPDATE history SET track_id=? WHERE track_id=?", (tid, old["id"]))
+        con.execute("DELETE FROM tracks WHERE id=?", (old["id"],))
+        phone_path = old["file"] if old["file"] and os.path.isabs(old["file"]) else None
+    for folder in (AUDIO_DIR, COVER_DIR, EXPORT_DIR):        # the app's own copies only
+        for f in folder.glob(f"{old['id']}.*"):
+            f.unlink(missing_ok=True)
+    for f in WAVE_DIR.glob(f"{old['id']}-*.json"):
+        f.unlink(missing_ok=True)
+    return {"track": get_track(tid), "phone_path": phone_path, "original_ext": Path(old["file"] or "").suffix.lower()}
+
+
+class ProblemIn(BaseModel):
+    where: str = "player"
+    message: str
+    song: Optional[str] = None
+
+
+@app.get("/api/problems")
+def problems():
+    return list(reversed(PROBLEMS))
+
+
+@app.post("/api/problems")
+def add_problem(body: ProblemIn):
+    log_problem(body.where[:40], body.message, body.song or "")
+    return {"ok": True}
+
+
+@app.delete("/api/problems")
+def clear_problems():
+    PROBLEMS.clear()
+    return {"ok": True}
 
 
 @app.post("/api/tracks/{tid}/played")
@@ -1063,7 +1318,9 @@ def _save_new_track(tid: str, out: Path, title: str, artist: str, album: str, pl
 def _run_ffmpeg(cmd: list[str]):
     r = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     if r.returncode != 0:
-        raise HTTPException(500, "Editing failed: " + (r.stderr.strip().splitlines() or ["unknown error"])[-1][:300])
+        why = (r.stderr.strip().splitlines() or [f"exit code {r.returncode}"])[-1][:300]
+        log_problem("ffmpeg", why)
+        raise HTTPException(500, "Processing the audio failed: " + why)
 
 
 def _trim_plan(body: "TrimIn") -> dict:

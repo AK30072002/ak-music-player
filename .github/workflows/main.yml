@@ -95,7 +95,7 @@ jobs:
           AK_PYTHON: ${{ matrix.python }}
         run: |
           export AK_VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then export AK_VERSION_NAME="${GITHUB_REF_NAME#v}"; else export AK_VERSION_NAME="2.2.$GITHUB_RUN_NUMBER"; fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then export AK_VERSION_NAME="${GITHUB_REF_NAME#v}"; else export AK_VERSION_NAME="2.3.$GITHUB_RUN_NUMBER"; fi
           gradle assembleRelease --no-daemon --stacktrace
           cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/AK-Music-Player-${{ matrix.label }}.apk"
 
