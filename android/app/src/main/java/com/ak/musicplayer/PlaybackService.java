@@ -19,6 +19,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 
 import java.io.InputStream;
@@ -44,6 +45,7 @@ public class PlaybackService extends Service {
 
     private MediaSession session;
     private WifiManager.WifiLock wifiLock;
+    private PowerManager.WakeLock wakeLock;     // keeps long songs streaming with the screen off
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private String title = "";
@@ -84,6 +86,11 @@ public class PlaybackService extends Service {
             wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "akmusic:stream");
             wifiLock.setReferenceCounted(false);
         }
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (pm != null) {
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "akmusic:playback");
+            wakeLock.setReferenceCounted(false);
+        }
     }
 
     @Override
@@ -113,15 +120,28 @@ public class PlaybackService extends Service {
                 loadArt(cover);
             }
         }
-        if (wifiLock != null) {
-            if (playing) wifiLock.acquire();
-            else if (wifiLock.isHeld()) wifiLock.release();
+        try {
+            if (wifiLock != null) {
+                if (playing) wifiLock.acquire();
+                else if (wifiLock.isHeld()) wifiLock.release();
+            }
+            if (wakeLock != null) {
+                if (playing) wakeLock.acquire(3 * 60 * 60 * 1000L);    // renewed with every update
+                else if (wakeLock.isHeld()) wakeLock.release();
+            }
+        } catch (Exception ignored) {
         }
-        Notification n = build();
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
-        } else {
-            startForeground(NOTIFICATION_ID, n);
+        try {
+            Notification n = build();
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+            } else {
+                startForeground(NOTIFICATION_ID, n);
+            }
+        } catch (Throwable e) {
+            // Android didn't allow the notification right now (app in the background on Android 12+):
+            // never crash for it; the music itself keeps playing and the next update tries again
+            stopSelf();
         }
         return START_NOT_STICKY;
     }
@@ -138,6 +158,7 @@ public class PlaybackService extends Service {
     public void onDestroy() {
         running = false;
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         if (session != null) session.release();
         super.onDestroy();
     }
@@ -211,8 +232,22 @@ public class PlaybackService extends Service {
 
     private void refresh() {
         if (!running) return;
-        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        nm.notify(NOTIFICATION_ID, build());
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            nm.notify(NOTIFICATION_ID, build());
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static byte[] readAll(InputStream in, int max) throws java.io.IOException {
+        java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[32 * 1024];
+        int n;
+        while ((n = in.read(buf)) > 0) {
+            b.write(buf, 0, n);
+            if (b.size() > max) throw new java.io.IOException("image too big");
+        }
+        return b.toByteArray();
     }
 
     private void loadArt(final String url) {
@@ -227,14 +262,22 @@ public class PlaybackService extends Service {
                     c.setConnectTimeout(8000);
                     c.setReadTimeout(8000);
                     InputStream in = c.getInputStream();
-                    Bitmap raw = BitmapFactory.decodeStream(in);
+                    byte[] data = readAll(in, 6 * 1024 * 1024);
                     in.close();
+                    // decode a smaller copy of big images: a full-size bitmap can use 30+ MB
+                    BitmapFactory.Options o = new BitmapFactory.Options();
+                    o.inJustDecodeBounds = true;
+                    BitmapFactory.decodeByteArray(data, 0, data.length, o);
+                    o.inSampleSize = 1;
+                    while (Math.min(o.outWidth, o.outHeight) / (o.inSampleSize * 2) >= 384) o.inSampleSize *= 2;
+                    o.inJustDecodeBounds = false;
+                    Bitmap raw = BitmapFactory.decodeByteArray(data, 0, data.length, o);
                     if (raw != null) {
                         int side = Math.min(raw.getWidth(), raw.getHeight());
                         Bitmap sq = Bitmap.createBitmap(raw, (raw.getWidth() - side) / 2, (raw.getHeight() - side) / 2, side, side);
-                        bmp = Bitmap.createScaledBitmap(sq, 512, 512, true);
+                        bmp = Bitmap.createScaledBitmap(sq, 384, 384, true);
                     }
-                } catch (Exception ignored) {
+                } catch (Throwable ignored) {
                 } finally {
                     if (c != null) c.disconnect();
                 }

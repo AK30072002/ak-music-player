@@ -85,8 +85,9 @@ DATA = Path(os.environ.get("AK_DATA", BASE / "data")).resolve()
 AUDIO_DIR = DATA / "audio"
 COVER_DIR = DATA / "covers"
 EXPORT_DIR = DATA / "exports"
+WAVE_DIR = DATA / "waves"
 DB_PATH = DATA / "ak-music.db"
-for d in (DATA, AUDIO_DIR, COVER_DIR, EXPORT_DIR):
+for d in (DATA, AUDIO_DIR, COVER_DIR, EXPORT_DIR, WAVE_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 COOKIES_FILE = os.environ.get("AK_COOKIES")              # path to a cookies.txt (Netscape format)
@@ -95,7 +96,7 @@ MP3_BITRATE = os.environ.get("AK_MP3_BITRATE", "320k")
 ON_ANDROID = os.environ.get("AK_PLATFORM") == "android"   # running inside the Android app
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 HAS_FFPROBE = shutil.which("ffprobe") is not None
-APP_VERSION = "2.3.0"
+APP_VERSION = "3.0.0"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
 
 AUDIO_TYPES = {
@@ -298,6 +299,23 @@ def expand_share_link(url: str) -> str:
     return url
 
 
+def single_from_mix(url: str) -> str:
+    """A YouTube link to a song inside a "Mix" or radio (list=RD…) means that song, not an endless mix."""
+    try:
+        u = urllib.parse.urlsplit(url)
+        if not re.search(r"(^|\.)(youtube\.com|youtu\.be)$", u.hostname or ""):
+            return url
+        q = urllib.parse.parse_qs(u.query)
+        lst = (q.get("list") or [""])[0]
+        has_video = "v" in q or u.hostname.endswith("youtu.be")
+        if has_video and (lst.startswith(("RD", "UL")) or "start_radio" in q):
+            keep = [(k, v) for k, vs in q.items() for v in vs if k not in ("list", "start_radio", "index", "pp")]
+            return urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, urllib.parse.urlencode(keep), ""))
+    except Exception:
+        pass
+    return url
+
+
 def upsert_track(con, info: dict, source_url: str) -> dict:
     extractor = info.get("extractor_key") or info.get("ie_key") or info.get("extractor") or "generic"
     vid = info.get("id") or uuid.uuid5(uuid.NAMESPACE_URL, source_url).hex
@@ -346,7 +364,8 @@ def find_audio(tid: str) -> Optional[Path]:
 
 def _cover_path(tid: str) -> Optional[Path]:
     for p in COVER_DIR.glob(f"{tid}.*"):
-        return p
+        if ".small." not in p.name:
+            return p
     return None
 
 
@@ -361,7 +380,10 @@ def cache_cover(tid: str, url: Optional[str]):
         ext = mimetypes.guess_extension(ctype) or ".jpg"
         if ext == ".jpe":
             ext = ".jpg"
-        (COVER_DIR / f"{tid}{ext}").write_bytes(data)
+        tmp = COVER_DIR / f".{tid}{ext}"
+        tmp.write_bytes(data)
+        tmp = shrink_cover(tmp)
+        os.replace(tmp, COVER_DIR / f"{tid}{tmp.suffix}")
     except Exception:
         pass
 
@@ -384,16 +406,7 @@ def ensure_audio(tid: str) -> Path:
         existing = find_audio(tid)
         if existing:
             return existing
-        source = t["source_url"]
-        if source.startswith(MUSIC_SEARCH):          # a song shared from Spotify, Apple Music, …
-            q = urllib.parse.parse_qs(source[len(MUSIC_SEARCH):])
-            want = (q.get("d") or [""])[0]
-            try:
-                source = find_youtube((q.get("q") or [""])[0], float(want) if want else None)
-            except HTTPException as e:
-                with db() as con:
-                    con.execute("UPDATE tracks SET status='error', error=? WHERE id=?", (e.detail, tid))
-                raise
+        source = _real_source(tid, t["source_url"])
         try:
             path, info = _download_audio(tid, source)
         except HTTPException as e:
@@ -406,7 +419,162 @@ def ensure_audio(tid: str) -> Path:
             con.execute("UPDATE tracks SET status='ready', error=NULL, file=?, duration=? WHERE id=?",
                         (path.name, dur, tid))
         cache_cover(tid, t["thumbnail"] or best_thumb(info or {}))
+        threading.Thread(target=trim_cache, args=(tid,), daemon=True).start()
         return path
+
+
+# ---------------------------------------------------------------- streaming long songs
+# A 2-hour mix is 100+ MB: downloading all of it before the first note takes minutes on a phone (and YouTube
+# slows down big downloads). Long songs are streamed instead: the player gets the audio straight from the
+# site, a piece at a time, through this server (so seeking works), and nothing big is stored on the phone.
+LONG_SONG = float(os.environ.get("AK_LONG_SONG", 10 * 60))     # seconds; longer songs are streamed
+STREAM_CHUNK = 4 * 1024 * 1024                                  # bytes per request to the site (big ones get throttled)
+STREAM_MAX_AGE = 4 * 3600                                       # the sites' links expire after a few hours
+STREAM_FORMAT = ("bestaudio[ext=m4a][protocol^=http][protocol!*=dash]/"
+                 "bestaudio[acodec^=mp4a][protocol^=http][protocol!*=dash]/"
+                 "bestaudio[protocol^=http][protocol!*=dash]/18/best[protocol^=http][protocol!*=dash]")
+STREAM_TYPES = {"m4a": "audio/mp4", "mp4": "video/mp4", "webm": "audio/webm", "mp3": "audio/mpeg",
+                "ogg": "audio/ogg", "opus": "audio/ogg", "aac": "audio/aac", "flac": "audio/flac"}
+_streams: dict[str, dict] = {}
+
+
+def _local_audio(t) -> Optional[Path]:
+    """The song's file if it's already on the phone / in the cache."""
+    if t["file"] and os.path.isabs(t["file"]):
+        p = Path(t["file"])
+        return p if p.exists() else None
+    return find_audio(t["id"])
+
+
+def _real_source(tid: str, source: str) -> str:
+    if source.startswith(MUSIC_SEARCH):          # a song shared from Spotify, Apple Music, …
+        q = urllib.parse.parse_qs(source[len(MUSIC_SEARCH):])
+        want = (q.get("d") or [""])[0]
+        try:
+            return find_youtube((q.get("q") or [""])[0], float(want) if want else None)
+        except HTTPException as e:
+            with db() as con:
+                con.execute("UPDATE tracks SET status='error', error=? WHERE id=?", (e.detail, tid))
+            raise
+    return source
+
+
+def should_stream(t) -> bool:
+    src = t["source_url"] or ""
+    return (bool(t["duration"]) and float(t["duration"]) > LONG_SONG and src.startswith(("http", MUSIC_SEARCH))
+            and _local_audio(t) is None)
+
+
+def _upstream(st: dict, start: int, end: int, timeout: float = 30):
+    headers = dict(st["headers"])
+    headers["Range"] = f"bytes={start}-{end}"
+    headers.setdefault("User-Agent", UA)
+    return urllib.request.urlopen(urllib.request.Request(st["url"], headers=headers), timeout=timeout)
+
+
+def resolve_stream(tid: str, fresh: bool = False) -> Optional[dict]:
+    """The direct audio link for a long song (cached for a few hours), or None if it can't be streamed."""
+    st = _streams.get(tid)
+    if st and not fresh and time.time() - st["at"] < STREAM_MAX_AGE:
+        return st
+    with db() as con:
+        t = con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
+    if not t:
+        raise HTTPException(404, "Track not found")
+    with lock_for("stream-" + tid):
+        st = _streams.get(tid)
+        if st and not fresh and time.time() - st["at"] < STREAM_MAX_AGE:
+            return st
+        source = _real_source(tid, t["source_url"])
+        opts = ydl_base_opts()
+        opts.update({"format": STREAM_FORMAT, "skip_download": True})
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(source, download=False) or {}
+        except Exception as e:
+            msg = clean_err(e)
+            log_problem("stream", msg, t["title"])
+            raise HTTPException(502, msg)
+        url, proto = info.get("url"), str(info.get("protocol") or "")
+        if not url or info.get("requested_formats") or info.get("is_live") or proto not in ("http", "https"):
+            return None
+        st = {"url": url, "headers": dict(info.get("http_headers") or {}), "at": time.time(),
+              "mime": STREAM_TYPES.get(str(info.get("ext") or "").lower(), "audio/mp4"),
+              "size": int(info.get("filesize") or 0)}
+        # ask for 2 bytes: tells the real size and whether the site lets us jump around in the file
+        try:
+            with _upstream(st, 0, 1, timeout=20) as r:
+                m = re.match(r"bytes \d+-\d+/(\d+)", r.headers.get("Content-Range") or "")
+                if r.status != 206 or not m:
+                    return None
+                st["size"] = int(m.group(1))
+                ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip()
+                if ctype.startswith(("audio/", "video/")):
+                    st["mime"] = ctype.replace("video/", "audio/") if ctype == "video/webm" else ctype
+        except Exception as e:
+            log_problem("stream", f"the site didn't answer ({e})", t["title"])
+            return None
+        _streams[tid] = st
+        dur = info.get("duration")
+        with db() as con:
+            con.execute("UPDATE tracks SET status='ready', error=NULL, duration=COALESCE(?, duration) WHERE id=?",
+                        (dur, tid))
+        threading.Thread(target=cache_cover, args=(tid, t["thumbnail"] or best_thumb(info)), daemon=True).start()
+        return st
+
+
+def stream_response(request: Request, tid: str, st: dict):
+    size = st["size"]
+    start, end = 0, size - 1
+    rng = request.headers.get("range")
+    if rng:
+        m = re.match(r"bytes=(\d*)-(\d*)", rng)
+        if not m:
+            raise HTTPException(416, "Bad range")
+        a, b = m.groups()
+        if a == "":
+            start = max(0, size - int(b or 0))
+        else:
+            start = int(a)
+            end = min(int(b), size - 1) if b else size - 1
+        if start > end or start >= size:
+            return JSONResponse({"detail": "Range not satisfiable"}, status_code=416,
+                                headers={"Content-Range": f"bytes */{size}"})
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-store", "Content-Length": str(end - start + 1)}
+    if rng:
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+
+    def body():
+        pos, fails, s = start, 0, st
+        while pos <= end:
+            stop = min(end, pos + STREAM_CHUNK - 1)
+            try:
+                with _upstream(s, pos, stop) as r:
+                    if r.status != 206:
+                        raise OSError(f"the site answered {r.status}")
+                    while pos <= stop:
+                        data = r.read(min(64 * 1024, stop - pos + 1))
+                        if not data:
+                            break
+                        pos += len(data)
+                        fails = 0
+                        yield data
+            except GeneratorExit:
+                raise
+            except Exception as e:
+                fails += 1
+                if fails > 4:
+                    log_problem("stream", f"stopped at {pos * 100 // max(size, 1)}% ({e})")
+                    return
+                time.sleep(min(2 * fails, 6))
+                if fails >= 2 or "403" in str(e) or "410" in str(e):
+                    try:                                  # the link expired: get a new one (same file only)
+                        n = resolve_stream(tid, fresh=True)
+                        if n and n["size"] == size:
+                            s = n
+                    except Exception:
+                        pass
+    return StreamingResponse(body(), status_code=206 if rng else 200, media_type=st["mime"], headers=headers)
 
 
 def ffmpeg_info(path: Path) -> dict:
@@ -568,9 +736,11 @@ def transcode_compatible(src: Path, dst: Path):
                  "-ac", "2", "-movflags", "+faststart", str(dst)])
 
 
-def range_response(request: Request, path: Path, media_type: str, filename: Optional[str] = None):
+def range_response(request: Request, path: Path, media_type: str, filename: Optional[str] = None,
+                   cache: bool = True):
     size = path.stat().st_size
-    headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=86400"}
+    # songs are played from this phone's own server: storing a second copy in the browser cache only fills storage
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=86400" if cache else "no-store"}
     if filename:
         headers["Content-Disposition"] = content_disposition(filename)
     rng = request.headers.get("range")
@@ -662,6 +832,131 @@ def build_export(t, fmt: str) -> tuple[Path, str]:
     return out, AUDIO_TYPES[ext]
 
 
+# ---------------------------------------------------------------- storage (keeps a budget phone from filling up)
+SETTINGS_FILE = DATA / "settings.json"
+DEFAULT_CACHE_MB = int(os.environ.get("AK_CACHE_MB", 2048))
+
+
+def server_settings() -> dict:
+    try:
+        return {"cache_limit_mb": DEFAULT_CACHE_MB, **json.loads(SETTINGS_FILE.read_text())}
+    except (OSError, ValueError):
+        return {"cache_limit_mb": DEFAULT_CACHE_MB}
+
+
+def _redownloadable(source: str) -> bool:
+    return (source or "").startswith(("http://", "https://", MUSIC_SEARCH))
+
+
+def _cached_files() -> list[tuple[str, Path, int, float]]:
+    out = []
+    for p in AUDIO_DIR.iterdir():
+        if p.is_file() and not p.name.startswith(".") and p.suffix.lower() in AUDIO_TYPES:
+            st = p.stat()
+            out.append((p.stem, p, st.st_size, st.st_mtime))
+    return out
+
+
+def storage_usage() -> dict:
+    with db() as con:
+        sources = {r["id"]: r["source_url"] for r in con.execute("SELECT id, source_url FROM tracks")}
+    cache = own = n = 0
+    for tid, _, size, _ in _cached_files():
+        if _redownloadable(sources.get(tid, "")):
+            cache += size
+            n += 1
+        else:
+            own += size
+    exports = sum(f.stat().st_size for f in EXPORT_DIR.iterdir() if f.is_file())
+    waves = sum(f.stat().st_size for f in WAVE_DIR.iterdir() if f.is_file())
+    covers = sum(f.stat().st_size for f in COVER_DIR.iterdir() if f.is_file())
+    return {"cache_bytes": cache, "cache_songs": n, "own_bytes": own, "temp_bytes": exports + waves,
+            "cover_bytes": covers, "limit_mb": server_settings()["cache_limit_mb"],
+            "audio": cache + own, "covers": covers, "exports": exports}
+
+
+IN_USE: dict[str, float] = {}       # songs the player opened recently: never removed while they may be playing
+
+
+def _evict(tid: str, path: Path) -> bool:
+    if time.time() - IN_USE.get(tid, 0) < 15 * 60:
+        return False
+    lk = lock_for(tid)
+    if not lk.acquire(blocking=False):            # being downloaded or repaired right now
+        return False
+    try:
+        path.unlink(missing_ok=True)
+        for f in EXPORT_DIR.glob(f"{tid}.*"):
+            f.unlink(missing_ok=True)
+        with db() as con:
+            con.execute("UPDATE tracks SET status='new', file=NULL WHERE id=? AND file=?", (tid, path.name))
+        return True
+    finally:
+        lk.release()
+
+
+def trim_cache(keep: Optional[str] = None, limit_mb: Optional[int] = None) -> int:
+    """Songs from links are kept for offline replay up to the storage limit; past it, the songs played
+    longest ago are removed (they download again when played). Liked songs go last. Returns bytes freed."""
+    limit_mb = server_settings()["cache_limit_mb"] if limit_mb is None else limit_mb
+    clean_temp()
+    if limit_mb <= 0:
+        return 0
+    with db() as con:
+        rows = {r["id"]: r for r in con.execute("SELECT id, source_url, liked, last_played, added_at FROM tracks")}
+    files = [f for f in _cached_files() if f[0] in rows and _redownloadable(rows[f[0]]["source_url"])]
+    total = sum(f[2] for f in files)
+    limit, freed = limit_mb * 1024 * 1024, 0
+    now = time.time()
+    files.sort(key=lambda f: (bool(rows[f[0]]["liked"]), rows[f[0]]["last_played"] or rows[f[0]]["added_at"] or 0))
+    for tid, path, size, mtime in files:
+        if total <= limit:
+            break
+        if tid == keep or now - mtime < 120:
+            continue
+        if _evict(tid, path):
+            total -= size
+            freed += size
+    return freed
+
+
+def clean_temp(max_age: float = 86400):
+    """Leftovers: converted downloads older than a day, half-finished downloads from a closed app."""
+    now = time.time()
+    for f in EXPORT_DIR.iterdir():
+        try:
+            if f.is_file() and now - f.stat().st_mtime > max_age:
+                f.unlink()
+        except OSError:
+            pass
+    for f in AUDIO_DIR.iterdir():
+        try:
+            if f.name.startswith((".dl-", ".fix-")) and now - f.stat().st_mtime > 6 * 3600:
+                shutil.rmtree(f, ignore_errors=True) if f.is_dir() else f.unlink()
+        except OSError:
+            pass
+
+
+def shrink_cover(path: Path, side: int = 500) -> Path:
+    """Covers from YouTube are 1280 px and up; 500 px looks the same on a phone and loads much faster."""
+    if not HAS_FFMPEG or path.stat().st_size < 60 * 1024:
+        return path
+    out = path.with_name(path.stem + ".small.jpg")
+    try:
+        r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(path), "-vf",
+                            f"scale='min({side},iw)':-2", "-frames:v", "1", "-q:v", "4", str(out)],
+                           capture_output=True, timeout=30)
+        if r.returncode == 0 and out.exists() and 0 < out.stat().st_size < path.stat().st_size:
+            final = path.with_suffix(".jpg")
+            path.unlink(missing_ok=True)
+            os.replace(out, final)
+            return final
+    except Exception:
+        pass
+    out.unlink(missing_ok=True)
+    return path
+
+
 # ---------------------------------------------------------------- app
 app = FastAPI(title="AK Music Player", version=APP_VERSION)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -705,7 +1000,7 @@ def add_link(body: AddLink):
     url = extract_link(body.url)
     if not url:
         raise HTTPException(400, "There's no link in what you pasted. Copy the link from the app's Share button and paste it here.")
-    url = expand_share_link(url)
+    url = single_from_mix(expand_share_link(url))
     if musiclinks.service_of(url):
         return _add_music_link(body, url)
     opts = ydl_base_opts()
@@ -891,16 +1186,49 @@ def delete_track(tid: str):
     return {"ok": True}
 
 
+def _row(tid: str):
+    with db() as con:
+        t = con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
+    if not t:
+        raise HTTPException(404, "Track not found")
+    return t
+
+
 @app.post("/api/tracks/{tid}/prepare")
-def prepare(tid: str):
+def prepare(tid: str, full: bool = False):
+    """Get a song ready to play. Long songs are streamed (ready in seconds); full=1 downloads them
+    anyway (the editor needs the whole file)."""
+    t = _row(tid)
+    if not full and should_stream(t):
+        try:
+            if resolve_stream(tid):
+                out = get_track(tid)
+                out.update(status="ready", streaming=True)
+                return out
+        except HTTPException as e:
+            if e.status_code == 404:
+                raise
+            # fall back to downloading it
     ensure_audio(tid)
     return get_track(tid)
 
 
 @app.get("/api/tracks/{tid}/audio")
 def audio(tid: str, request: Request):
-    path = ensure_audio(tid)
-    return range_response(request, path, AUDIO_TYPES.get(path.suffix.lower(), "application/octet-stream"))
+    t = _row(tid)
+    IN_USE[tid] = time.time()
+    path = _local_audio(t)
+    if not path and should_stream(t):
+        st = None
+        try:
+            st = resolve_stream(tid)
+        except HTTPException:
+            pass
+        if st:
+            return stream_response(request, tid, st)
+    path = path or ensure_audio(tid)
+    return range_response(request, path, AUDIO_TYPES.get(path.suffix.lower(), "application/octet-stream"),
+                          cache=False)
 
 
 @app.get("/api/tracks/{tid}/cover")
@@ -936,6 +1264,16 @@ def repair(tid: str):
         t = con.execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
     if not t:
         raise HTTPException(404, "Track not found")
+    if should_stream(t):                               # a long song that streams: get a fresh link to it
+        _streams.pop(tid, None)
+        try:
+            if resolve_stream(tid, fresh=True):
+                out = get_track(tid)
+                out.update(status="ready", streaming=True)
+                return out
+        except HTTPException as e:
+            log_problem("repair", e.detail, t["title"])
+            raise
     with lock_for(tid):
         for folder in (EXPORT_DIR, WAVE_DIR):
             for f in folder.glob(f"{tid}*"):
@@ -1039,6 +1377,44 @@ def add_problem(body: ProblemIn):
 def clear_problems():
     PROBLEMS.clear()
     return {"ok": True}
+
+
+class StorageIn(BaseModel):
+    limit_mb: int
+
+
+@app.get("/api/storage")
+def storage():
+    return storage_usage()
+
+
+@app.post("/api/storage")
+def set_storage(body: StorageIn):
+    cur = server_settings()
+    cur["cache_limit_mb"] = max(0, int(body.limit_mb))
+    SETTINGS_FILE.write_text(json.dumps(cur))
+    threading.Thread(target=trim_cache, daemon=True).start()
+    return storage_usage()
+
+
+@app.post("/api/storage/clear")
+def clear_storage(keep: str = ""):
+    """Removes the offline copies of songs from links (they download again when played) and temporary files.
+    Songs on the phone, uploads and edited songs are never touched."""
+    with db() as con:
+        sources = {r["id"]: r["source_url"] for r in con.execute("SELECT id, source_url FROM tracks")}
+    freed = 0
+    for tid, path, size, _ in _cached_files():
+        if tid != keep and _redownloadable(sources.get(tid, "")) and _evict(tid, path):
+            freed += size
+    for d in (EXPORT_DIR, WAVE_DIR):
+        for f in d.iterdir():
+            if f.is_file():
+                freed += f.stat().st_size
+                f.unlink(missing_ok=True)
+    out = storage_usage()
+    out["freed_bytes"] = freed
+    return out
 
 
 @app.post("/api/tracks/{tid}/played")
@@ -1209,8 +1585,6 @@ def download_playlist(pid: str, format: str = "mp3"):
 
 
 # ---------- version 2: song editor, combining songs, songs already on the phone
-WAVE_DIR = DATA / "waves"
-WAVE_DIR.mkdir(parents=True, exist_ok=True)
 DEVICE_ROOTS = ("/storage/", "/sdcard/", "/mnt/sdcard/")
 
 
@@ -1240,22 +1614,51 @@ def waveform(tid: str, points: int = 800):
     if not t:
         raise HTTPException(404, "Track not found")
     src = ensure_audio(tid)
-    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(src), "-ac", "1", "-ar", "4000", "-f", "s16le", "-"],
-                       capture_output=True)
-    if r.returncode != 0 or not r.stdout:
+    # read the decoded audio a piece at a time: a 2-hour song would otherwise need 100+ MB of memory
+    known = t["duration"] or probe_duration(src) or 0
+    rate = 4000 if known <= 1200 else 1000
+    step = max(1, int(known * rate / points)) if known else 0
+    proc = subprocess.Popen(["ffmpeg", "-v", "error", "-i", str(src), "-ac", "1", "-ar", str(rate), "-f", "s16le", "-"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    peaks, n, pending, cur, inb = [], 0, b"", 0, 0
+    fine = []                                    # when the length is unknown: 100 peaks a second, merged at the end
+    blk = step or rate // 100
+    try:
+        while True:
+            data = proc.stdout.read(256 * 1024)
+            if not data:
+                break
+            data = pending + data
+            cut = len(data) // 2 * 2
+            pending = data[cut:]
+            a = array.array("h")
+            a.frombytes(data[:cut])
+            if sys.byteorder == "big":
+                a.byteswap()
+            n += len(a)
+            i = 0
+            while i < len(a):
+                take = min(blk - inb, len(a) - i)
+                part = a[i:i + take]
+                cur = max(cur, max(part), -min(part))
+                inb += take
+                i += take
+                if inb == blk:
+                    (peaks if step else fine).append(cur)
+                    cur, inb = 0, 0
+    finally:
+        proc.stdout.close()
+        rc = proc.wait()
+    if inb:
+        (peaks if step else fine).append(cur)
+    if rc != 0 or not n:
         raise HTTPException(500, "Couldn't read the audio for the waveform")
-    samples = array.array("h")
-    samples.frombytes(r.stdout[: len(r.stdout) // 2 * 2])
-    if sys.byteorder == "big":
-        samples.byteswap()
-    n = len(samples)
-    step = max(1, n // points)
-    peaks = []
-    for i in range(0, n, step):
-        chunk = samples[i:i + step]
-        peaks.append(round(max(max(chunk), -min(chunk)) / 32768, 3))
+    if not step:
+        k = max(1, len(fine) // points)
+        peaks = [max(fine[j:j + k]) for j in range(0, len(fine), k)]
+    peaks = [p / 32768 for p in peaks]
     top = max(peaks) or 1
-    data = {"duration": n / 4000, "peaks": [round(p / top, 3) for p in peaks[:points]]}
+    data = {"duration": n / rate, "peaks": [round(p / top, 3) for p in peaks[:points]]}
     with db() as con:
         if not t["duration"]:
             con.execute("UPDATE tracks SET duration=? WHERE id=?", (data["duration"], tid))
@@ -1595,13 +1998,6 @@ def clear_history():
     return {"ok": True}
 
 
-@app.get("/api/storage")
-def storage():
-    def size(folder):
-        return sum(p.stat().st_size for p in folder.glob("*") if p.is_file())
-    return {"audio": size(AUDIO_DIR), "covers": size(COVER_DIR), "exports": size(EXPORT_DIR)}
-
-
 @app.delete("/api/storage/exports")
 def clear_exports():
     for p in EXPORT_DIR.glob("*"):
@@ -1666,3 +2062,8 @@ class PlayerFiles(StaticFiles):
 
 
 app.mount("/", PlayerFiles(directory=FRONTEND, html=True), name="frontend")
+
+try:
+    clean_temp()
+except Exception:
+    pass

@@ -5,21 +5,29 @@ import android.app.Activity;
 import android.app.PendingIntent;
 import android.app.RecoverableSecurityException;
 import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -49,7 +57,7 @@ import java.util.regex.Pattern;
  */
 public class MainActivity extends Activity {
 
-    public static final String VERSION = "2.3.0";
+    public static final String VERSION = "3.0.0";
     static final String LOADING_URL = "file:///android_asset/loading.html";
 
     private static final int REQ_FILE = 11;
@@ -73,6 +81,18 @@ public class MainActivity extends Activity {
     private String pendingDownloadUrl, pendingDownloadName;
     private JSONArray pendingDelete;       // phone files waiting for the user's delete confirmation
     private int deleteIndex;                // Android 10: files are confirmed one at a time
+    private long[] restarts = new long[3];  // when the player screen was last restarted (loop guard)
+    private boolean noisyRegistered;
+
+    /** Headphones unplugged or Bluetooth headset disconnected: pause, like every music app. */
+    private final BroadcastReceiver noisy = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context c, Intent i) {
+            if (AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(i.getAction())) {
+                runJs("window.akCommand && window.akCommand('noisy')");
+            }
+        }
+    };
 
     // ------------------------------------------------------------------ lifecycle
     @Override
@@ -80,9 +100,30 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         current = new WeakReference<>(this);
 
-        web = new WebView(this);
-        web.setBackgroundColor(Color.parseColor("#14201A"));
+        web = buildWebView();
         setContentView(web);
+        clearCacheAfterUpdate();
+
+        try {
+            IntentFilter f = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(noisy, f, Context.RECEIVER_NOT_EXPORTED);
+            else registerReceiver(noisy, f);
+            noisyRegistered = true;
+        } catch (Exception ignored) {
+        }
+
+        handleShare(getIntent(), true);
+        web.loadUrl(LOADING_URL);
+        startEngine();
+    }
+
+    /** The player screen. Built again if Android stops it to free memory (see Client.onRenderProcessGone). */
+    private WebView buildWebView() {
+        WebView web = new WebView(this);
+        web.setBackgroundColor(Color.parseColor("#14201A"));
+        // keep the player's renderer as important as the app itself, even with the screen off,
+        // so Android doesn't stop it (and the music) to free memory
+        if (Build.VERSION.SDK_INT >= 26) web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -95,7 +136,6 @@ public class MainActivity extends Activity {
         s.setUserAgentString(s.getUserAgentString() + " AKMusicPlayerApp/" + VERSION);
         CookieManager.getInstance().setAcceptCookie(true);
 
-        clearCacheAfterUpdate();
         web.addJavascriptInterface(new Bridge(), "AKAndroid");
         web.setWebViewClient(new Client());
         web.setWebChromeClient(new Chrome());
@@ -106,10 +146,29 @@ public class MainActivity extends Activity {
                 download(url, URLUtil.guessFileName(url, contentDisposition, mimeType));
             }
         });
+        return web;
+    }
 
-        handleShare(getIntent(), true);
-        web.loadUrl(LOADING_URL);
-        startEngine();
+    /** Android stopped the player screen (low memory) or it crashed: build it again and carry on playing. */
+    void restartWebView(boolean crashed) {
+        long now = SystemClock.elapsedRealtime();
+        boolean looping = restarts[0] != 0 && now - restarts[0] < 60000;     // 3 restarts within a minute
+        System.arraycopy(restarts, 1, restarts, 0, restarts.length - 1);
+        restarts[restarts.length - 1] = now;
+        AKApp.record(this, "[restart]" + (crashed ? "The player screen crashed and was restarted automatically."
+                : "Android stopped the player screen to free memory; it was restarted automatically."));
+        try {
+            if (web != null) {
+                ViewGroup parent = (ViewGroup) web.getParent();
+                if (parent != null) parent.removeView(web);
+                web.destroy();
+            }
+        } catch (Throwable ignored) {
+        }
+        web = buildWebView();
+        setContentView(web);
+        if (base != null) web.loadUrl(base + "/" + (looping ? "" : "?resume=1"));
+        else web.loadUrl(LOADING_URL);
     }
 
     @Override
@@ -121,6 +180,13 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (noisyRegistered) {
+            try {
+                unregisterReceiver(noisy);
+            } catch (Exception ignored) {
+            }
+            noisyRegistered = false;
+        }
         stopService(new Intent(this, PlaybackService.class));
         if (web != null) {
             web.destroy();
@@ -133,6 +199,10 @@ public class MainActivity extends Activity {
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
+        if (web == null) {
+            moveTaskToBack(true);
+            return;
+        }
         web.evaluateJavascript("(window.akBack && window.akBack()) ? '1' : '0'", new ValueCallback<String>() {
             @Override
             public void onReceiveValue(String value) {
@@ -236,7 +306,10 @@ public class MainActivity extends Activity {
         a.runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                a.web.evaluateJavascript(js, null);
+                try {
+                    if (a.web != null && !a.isDestroyed()) a.web.evaluateJavascript(js, null);
+                } catch (Throwable ignored) {
+                }
             }
         });
     }
@@ -418,6 +491,26 @@ public class MainActivity extends Activity {
             engineError = "The music engine stopped (" + error.getDescription() + ").";
             view.loadUrl(LOADING_URL);
         }
+
+        @Override
+        public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+            // without this, Android closes the whole app when the player screen is stopped
+            final boolean crashed = Build.VERSION.SDK_INT >= 26 && detail != null && detail.didCrash();
+            if (view != web) {             // an old screen that was already replaced
+                try {
+                    view.destroy();
+                } catch (Throwable ignored) {
+                }
+                return true;
+            }
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                @Override
+                public void run() {
+                    if (!isDestroyed()) restartWebView(crashed);
+                }
+            });
+            return true;
+        }
     }
 
     void openExternal(String url) {
@@ -539,9 +632,50 @@ public class MainActivity extends Activity {
             runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
-                    Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            Uri.fromParts("package", getPackageName(), null));
-                    startActivity(i);
+                    try {
+                        startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.fromParts("package", getPackageName(), null)));
+                    } catch (Exception e) {
+                        Toast.makeText(MainActivity.this, "Open Android Settings \u2192 Apps \u2192 AK Music Player", Toast.LENGTH_LONG).show();
+                    }
+                }
+            });
+        }
+
+        /** Why the app closed last time (once), for Settings \u2192 Recent problems. */
+        @JavascriptInterface
+        public String lastCrash() {
+            return AKApp.takeLastCrash(MainActivity.this);
+        }
+
+        /** True if Android lets the app keep running with the screen off (no battery restrictions). */
+        @JavascriptInterface
+        public boolean batteryUnrestricted() {
+            try {
+                PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                return pm == null || pm.isIgnoringBatteryOptimizations(getPackageName());
+            } catch (Exception e) {
+                return true;
+            }
+        }
+
+        @JavascriptInterface
+        @SuppressWarnings("BatteryLife")
+        public void requestBatteryUnrestricted() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:" + getPackageName())));
+                    } catch (Exception e) {
+                        try {
+                            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                        } catch (Exception e2) {
+                            Toast.makeText(MainActivity.this, "Open Android Settings \u2192 Apps \u2192 AK Music Player \u2192 Battery",
+                                    Toast.LENGTH_LONG).show();
+                        }
+                    }
                 }
             });
         }
@@ -576,7 +710,8 @@ public class MainActivity extends Activity {
                     askNotificationPermission();
                     startForegroundService(i);
                 }
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
+                // Android refused to start the notification from the background; music keeps playing
             }
         }
 
@@ -602,17 +737,24 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void copy(String text) {
-            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            cm.setPrimaryClip(ClipData.newPlainText("link", text));
+            try {
+                ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(ClipData.newPlainText("link", text));
+            } catch (Exception ignored) {
+            }
         }
 
         @JavascriptInterface
         public String getClipboard() {
-            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            ClipData clip = cm.getPrimaryClip();
-            if (clip == null || clip.getItemCount() == 0) return "";
-            CharSequence t = clip.getItemAt(0).coerceToText(MainActivity.this);
-            return t == null ? "" : t.toString();
+            try {
+                ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                ClipData clip = cm.getPrimaryClip();
+                if (clip == null || clip.getItemCount() == 0) return "";
+                CharSequence t = clip.getItemAt(0).coerceToText(MainActivity.this);
+                return t == null ? "" : t.toString();
+            } catch (Exception e) {
+                return "";
+            }
         }
 
         @JavascriptInterface

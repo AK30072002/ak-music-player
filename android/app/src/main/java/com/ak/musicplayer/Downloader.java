@@ -59,7 +59,7 @@ final class Downloader {
                         in.close();
                     }
                     toast(activity, "Saved to Downloads/" + FOLDER + ": " + name);
-                } catch (Exception e) {
+                } catch (Throwable e) {
                     toast(activity, "Download failed: " + e.getMessage());
                 } finally {
                     if (c != null) c.disconnect();
@@ -153,10 +153,14 @@ final class Downloader {
     }
 
     private static void toast(final Activity a, final String msg) {
-        a.runOnUiThread(new Runnable() {
+        final android.content.Context app = a.getApplicationContext();   // works even if the screen was closed
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
             @Override
             public void run() {
-                Toast.makeText(a, msg, Toast.LENGTH_LONG).show();
+                try {
+                    Toast.makeText(app, msg, Toast.LENGTH_LONG).show();
+                } catch (Throwable ignored) {
+                }
             }
         });
     }

@@ -130,7 +130,7 @@ const audioUrl = t => `/api/tracks/${encodeURIComponent(t.id)}/audio${t._rev ? '
 const DEFAULTS = {
   theme: 'auto', onPaste: 'play', crossfade: 0, effects: !isIOS && !IN_APP, normalize: false,
   eq: [0, 0, 0, 0, 0], eqPreset: 'Flat', volume: 0.8, muted: false, speed: 1,
-  resume: true, shuffle: false, repeat: 'off',
+  resume: true, shuffle: false, repeat: 'off', lite: IN_APP,
 };
 const settings = Object.assign({}, DEFAULTS, load('settings') || {});
 const saveSettings = () => store('settings', settings);
@@ -364,8 +364,10 @@ function onTime() {
   const d = decks[active], t = current();
   if (!t) return;
   const dur = isFinite(d.duration) ? d.duration : (t.duration || 0);
-  updateProgress(d.currentTime, dur);
-  highlightLyrics(d.currentTime);
+  if (!document.hidden) {                     // nothing to draw while the screen is off or the app is hidden
+    updateProgress(d.currentTime, dur);
+    highlightLyrics(d.currentTime);
+  }
   if (!P.counted && d.currentTime > Math.min(30, (dur || 60) * 0.5)) {
     P.counted = true;
     t.play_count = (t.play_count || 0) + 1;
@@ -566,7 +568,7 @@ function saveSession() {
   const strip = t => { const { error, ...rest } = t; return rest; };
   store('session', {
     queue: P.queue.slice(0, 500).map(strip), index: P.index, from: P.from,
-    time: decks[active].currentTime || P.resumeAt || 0,
+    time: decks[active].currentTime || P.resumeAt || 0, playing: P.playing,
     original: P.original ? P.original.slice(0, 500).map(strip) : null,
   });
 }
@@ -578,8 +580,15 @@ function restoreSession() {
   const t = current();
   renderNow();
   updateProgress(P.resumeAt, t?.duration || 0);
+  return s;
 }
 addEventListener('pagehide', saveSession);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return saveSession();
+  onTime();
+  if (window.akRecheck && currentRoute().name === 'settings') { window.akRecheck = false; route(); }
+  if (!$('#nowPlaying').hidden && !vizRaf) vizLoop();
+});
 
 /* ---------- media session (lock screen, headphones, keyboard media keys) */
 function updateMediaSession() {
@@ -619,6 +628,7 @@ function notifyNative(force = false) {
 function setPlaying(b) {
   P.playing = b;
   notifyNative();
+  if (b && analyser && !vizRaf && !$('#nowPlaying').hidden) vizLoop();
   playBtns().forEach(btn => { setIcon(btn, P.loading ? 'loader' : b ? 'pause' : 'play'); btn.setAttribute('aria-label', b ? 'Pause' : 'Play'); });
   document.body.classList.toggle('paused', !b);
   document.body.classList.toggle('spinning', !!current());
@@ -641,13 +651,35 @@ function renderNow() {
     img.src = t?.cover || 'logo.png'; img.hidden = false;
     img.onerror = () => { img.onerror = null; img.src = 'logo.png'; };
   });
-  $('#npBg').style.backgroundImage = t?.cover ? `url("${t.cover}")` : 'none';
+  softBackground(t?.cover);
   $('#npFrom').textContent = P.from ? `Playing from ${P.from}` : t ? `Playing from ${t.platform || 'your library'}` : '';
   ['#likeBtn', '#npLike'].forEach(s => $(s).setAttribute('aria-pressed', String(!!t?.liked)));
   document.title = t ? `${t.title}${t.artist ? ' – ' + t.artist : ''} | AK Music Player` : 'AK Music Player';
   markPlayingRows();
   setPlaying(P.playing);
   renderPanelIf('queue');
+}
+// The now-playing background: the cover shrunk to a few pixels and stretched, which looks blurred.
+// (A real CSS blur over the whole screen makes budget phones stutter.)
+let bgFor = '';
+function softBackground(url) {
+  const box = $('#npBg');
+  if (url === bgFor) return;
+  bgFor = url || '';
+  if (!url) { box.style.backgroundImage = 'none'; return; }
+  const img = new Image();
+  img.onload = () => {
+    if (bgFor !== url) return;
+    try {
+      const c = document.createElement('canvas'); c.width = c.height = 24;
+      const g = c.getContext('2d');
+      g.filter = 'blur(2px) saturate(1.3)';
+      g.drawImage(img, -4, -4, 32, 32);
+      box.style.backgroundImage = `url("${c.toDataURL('image/jpeg', 0.8)}")`;
+    } catch { box.style.backgroundImage = 'none'; }
+  };
+  img.onerror = () => { if (bgFor === url) box.style.backgroundImage = 'none'; };
+  img.src = url;
 }
 function markPlayingRows() {
   const id = current()?.id;
@@ -790,7 +822,9 @@ function vizLoop() {
     g.stroke();
   }
   g.globalAlpha = 1;
-  vizRaf = requestAnimationFrame(vizLoop);
+  // without the audio analyser (or when paused / hidden) the ring doesn't move: draw it once, then rest
+  if (!analyser || !P.playing || document.hidden || $('#nowPlaying').hidden) { vizRaf = 0; return; }
+  vizRaf = requestAnimationFrame(settings.lite ? () => { vizRaf = requestAnimationFrame(vizLoop); } : vizLoop);
 }
 
 /* ================================================================ toasts / menus / modals */
@@ -1139,14 +1173,14 @@ const hueOf = s => { let h = 0; for (const c of String(s || '')) h = (h * 31 + c
 const genArt = name => `<div class="ph-art gen" style="--h:${hueOf(name)}"><span>${esc((String(name || '♪').trim()[0] || '♪').toUpperCase())}</span></div>`;
 function art(t, cls = '') {
   return t.cover
-    ? `<img src="${esc(t.cover)}" alt="" loading="lazy" class="${cls}" data-name="${esc(t.title)}" onerror="imgFail(this)">`
+    ? `<img src="${esc(t.cover)}" alt="" loading="lazy" decoding="async" class="${cls}" data-name="${esc(t.title)}" onerror="imgFail(this)">`
     : genArt(t.title);
 }
 window.imgFail = img => { const d = document.createElement('div'); d.innerHTML = img.dataset.name ? genArt(img.dataset.name) : `<div class="ph-art">${ic('music')}</div>`; img.replaceWith(d.firstElementChild); };
 function mosaic(covers, size = '', name = '') {
   if (!covers || !covers.length) return `<div class="mosaic one" style="${size}">${name ? genArt(name) : `<div class="ph-art">${ic('music')}</div>`}</div>`;
-  if (covers.length < 4) return `<div class="mosaic one" style="${size}"><img src="${esc(covers[0])}" alt="" loading="lazy" onerror="imgFail(this)"></div>`;
-  return `<div class="mosaic" style="${size}">${covers.slice(0, 4).map(c => `<img src="${esc(c)}" alt="" loading="lazy" onerror="imgFail(this)">`).join('')}</div>`;
+  if (covers.length < 4) return `<div class="mosaic one" style="${size}"><img src="${esc(covers[0])}" alt="" loading="lazy" decoding="async" onerror="imgFail(this)"></div>`;
+  return `<div class="mosaic" style="${size}">${covers.slice(0, 4).map(c => `<img src="${esc(c)}" alt="" loading="lazy" decoding="async" onerror="imgFail(this)">`).join('')}</div>`;
 }
 function trackRow(t, i, key, { when = false, sortable = false } = {}) {
   const cur = isCurrent(t);
@@ -1512,7 +1546,7 @@ afterRender.edit = async r => {
   const id = box.dataset.id;
   let t, w;
   try {
-    t = await api(`/tracks/${encodeURIComponent(id)}/prepare`, { method: 'POST' });
+    t = await api(`/tracks/${encodeURIComponent(id)}/prepare?full=1`, { method: 'POST' });
     if (nativeEditing()) {
       const src = await api(`/tracks/${encodeURIComponent(id)}/source`);
       w = await nativeJob({ op: 'waveform', src: src.path, points: 900 });
@@ -2062,6 +2096,17 @@ function accountsHTML() {
       ${any ? `<button class="chip" data-act="sign-out">${ic('x')}Sign out</button>` : ''}</div></section>
     <section><h2>App</h2><p>AK Music Player ${esc(AKA.version?.() || '')} for Android. Everything runs on this phone: no computer, no account and no ads.</p></section>`;
 }
+function backgroundHTML() {
+  let free = true;
+  try { free = AKA.batteryUnrestricted?.() ?? true; } catch { }
+  return `<section><h2>Background playback</h2>
+    <p>Music pauses by itself when you unplug headphones or your Bluetooth headset disconnects.
+    ${free ? 'AK Music Player is allowed to keep playing with the screen off.'
+      : 'If music stops when the screen is off, allow AK Music Player to run in the background.'}</p>
+    <div class="row-btns">${free ? '' : `<button class="chip" data-act="battery">${ic('check')}Allow background playback</button>`}
+      <button class="chip" data-act="phone-settings">${ic('settings')}App settings</button></div>
+    <p class="hint">Xiaomi, Redmi and POCO phones: also open App settings → Battery saver → No restrictions, and turn on Autostart.</p></section>`;
+}
 window.akAccountsChanged = () => { if (currentRoute().name === 'settings') route(); toast('Signed in. Try your link again.'); };
 async function viewSettings() {
   const [health, storage, problems] = await Promise.all([api('/health').catch(() => null), api('/storage').catch(() => null), api('/problems').catch(() => [])]);
@@ -2076,10 +2121,17 @@ async function viewSettings() {
         <p class="hint">Blends the end of one song into the start of the next.</p></div>
       <label class="switch"><span>Audio effects<small>Equalizer, volume levelling and the visualizer. ${isIOS ? 'On iPhone and iPad this can stop playback when the screen locks.' : 'Takes effect after a reload.'}</small></span><input type="checkbox" id="fxToggle" ${settings.effects ? 'checked' : ''}></label>
       <label class="switch"><span>Continue where I left off<small>Remembers your queue and position when you come back.</small></span><input type="checkbox" id="resumeToggle" ${settings.resume ? 'checked' : ''}></label>
+      <label class="switch"><span>Smooth mode<small>Lighter animations and effects, for budget phones. Recommended on phones.</small></span><input type="checkbox" id="liteToggle" ${settings.lite ? 'checked' : ''}></label>
     </section>
+    ${IN_APP ? backgroundHTML() : ''}
     <section><h2>Storage</h2>
-      <p>${storage ? `Cached audio ${fmtBytes(storage.audio)}, artwork ${fmtBytes(storage.covers)}, converted downloads ${fmtBytes(storage.exports)}.` : 'Storage details unavailable.'} Cached audio makes songs start instantly the second time.</p>
-      <div class="row-btns"><button class="chip" data-act="clear-exports">${ic('trash')}Clear converted downloads</button></div></section>
+      <p>${storage ? `Songs kept for offline replay: ${storage.cache_songs ?? ''} (${fmtBytes(storage.cache_bytes ?? storage.audio)}). Your uploads and edited songs: ${fmtBytes(storage.own_bytes ?? 0)}. Artwork ${fmtBytes(storage.covers)}, temporary files ${fmtBytes(storage.temp_bytes ?? storage.exports)}.` : 'Storage details unavailable.'}
+        Songs from links are kept so they start instantly next time; songs longer than 10 minutes stream instead.</p>
+      <div class="lbl">Keep offline copies up to</div>
+      <div class="chips" id="cacheChips">${[[500, '500 MB'], [1024, '1 GB'], [2048, '2 GB'], [5120, '5 GB'], [0, 'No limit']].map(([v, l]) =>
+        `<button class="chip ${storage && storage.limit_mb === v ? 'on' : ''}" data-cache="${v}">${l}</button>`).join('')}</div>
+      <p class="hint">When the limit is reached, the songs you played longest ago are removed first (liked songs last). They download again when you play them.</p>
+      <div class="row-btns"><button class="chip" data-act="free-space">${ic('trash')}Free up space now</button><button class="chip" data-act="clear-exports">${ic('trash')}Clear converted downloads</button></div></section>
     <section><h2>Backup</h2><p>Save your library, likes and playlists to a file, or restore them on another device.</p>
       <div class="row-btns"><a class="chip" href="/api/backup" download>${ic('download')}Download backup</a>
       <label class="chip" style="cursor:pointer">${ic('upload')}Restore from backup<input type="file" accept="application/json,.json" id="restoreInput" hidden></label></div></section>
@@ -2115,6 +2167,17 @@ afterRender.settings = () => {
     settings.effects = e.target.checked; saveSettings();
     toast('Reload the app to apply', { action: ['Reload', () => { saveSession(); location.reload(); }] });
   });
+  $('#liteToggle')?.addEventListener('change', e => {
+    settings.lite = e.target.checked; saveSettings();
+    document.body.classList.toggle('lite', settings.lite);
+  });
+  $$('[data-cache]', view).forEach(b => b.addEventListener('click', async () => {
+    try {
+      await api('/storage', { method: 'POST', body: { limit_mb: +b.dataset.cache } });
+      $$('[data-cache]', view).forEach(x => x.classList.toggle('on', x === b));
+      toast(+b.dataset.cache ? `Offline copies limited to ${b.textContent}` : 'No limit for offline copies');
+    } catch (err) { toast(err.message, { error: true }); }
+  }));
   $('#resumeToggle').addEventListener('change', e => { settings.resume = e.target.checked; saveSettings(); if (!settings.resume) localStorage.removeItem('akmp.session'); });
   $('#restoreInput').addEventListener('change', async e => {
     const f = e.target.files[0]; if (!f) return;
@@ -2154,6 +2217,12 @@ async function handleAct(act, el) {
       return;
     case 'clear-problems': await api('/problems', { method: 'DELETE' }); return route();
     case 'clear-exports': await api('/storage/exports', { method: 'DELETE' }); toast('Converted downloads cleared'); return route();
+    case 'free-space': {
+      if (!await confirmModal('Free up space?', 'Removes the offline copies of songs from links. They stay in your library and download again when you play them. Songs on your phone, uploads and edits are kept.', 'Free up space')) return;
+      const r = await api(`/storage/clear?keep=${encodeURIComponent(current()?.id || '')}`, { method: 'POST' });
+      toast(`Freed ${fmtBytes(r.freed_bytes || 0)}`); return route();
+    }
+    case 'battery': try { AKA.requestBatteryUnrestricted(); window.akRecheck = true; } catch { } return;
   }
 }
 function onListClick(e) {
@@ -2361,6 +2430,8 @@ window.akCommand = (cmd, arg) => ({
   toggle: togglePlay, next: () => next(), prev,
   play: () => { if (!P.playing) togglePlay(); }, pause: () => { if (P.playing) togglePlay(); },
   seek: () => seekTo((+arg || 0) / 1000),
+  noisy: () => { if (P.playing) { togglePlay(); toast('Paused: headphones disconnected'); } },
+  resume: () => resumeAfterRestart(),
 }[cmd] || (() => { }))();
 window.akShared = url => addLink(url);
 window.akBack = () => {
@@ -2380,8 +2451,31 @@ renderVolume();
 renderModes();
 hydrate();
 setPlaying(false);
-restoreSession();
+document.body.classList.toggle('lite', !!settings.lite);
+const session = restoreSession();
 refreshPlaylists().then(route);
+// Android closed the player screen to free memory (or the app crashed): carry on where the music was
+function resumeAfterRestart() {
+  if (current() && !P.playing) playIndex(P.index, { startAt: P.resumeAt });
+}
+{
+  const qs = new URLSearchParams(location.search);
+  if (qs.has('resume')) {
+    history.replaceState(null, '', location.pathname + location.hash);
+    if (session?.playing) resumeAfterRestart();
+  }
+  if (IN_APP) {
+    let crash = '';
+    try { crash = AKA.lastCrash?.() || ''; } catch { }
+    if (crash.startsWith('[restart]')) {
+      api('/problems', { method: 'POST', body: { where: 'player restarted', message: crash.slice(9) } }).catch(() => { });
+      if (session?.playing) toast('Your phone ran low on memory, so the player restarted. Your music carries on.', { ms: 6000 });
+    } else if (crash) {
+      api('/problems', { method: 'POST', body: { where: 'app closed', message: crash } }).catch(() => { });
+      toast('AK Music Player closed unexpectedly last time. Settings → Recent problems has the details.', { ms: 7000 });
+    }
+  }
+}
 // links shared to the installed app (Android share sheet) or opened as /?url=…
 {
   const qs = new URLSearchParams(location.search);

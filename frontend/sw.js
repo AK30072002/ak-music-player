@@ -1,5 +1,5 @@
 // AK Music Player service worker: caches the app shell so it opens instantly and installs as an app.
-const CACHE = 'ak-music-shell-v2';
+const CACHE = 'ak-music-shell-v3';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/logo.png', '/icon-192.png', '/manifest.json'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

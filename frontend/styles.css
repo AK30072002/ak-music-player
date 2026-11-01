@@ -195,6 +195,7 @@ select.select { background: var(--surface); border: 1px solid var(--line); borde
   align-items: center; gap: 12px; padding: 6px 10px; border-radius: 10px; user-select: none;
 }
 .trow:hover { background: var(--surface); }
+.tracks > .trow:not(.thead) { content-visibility: auto; contain-intrinsic-size: auto 60px; }
 .trow.playing .tt { color: var(--accent); }
 .trow.dragging { opacity: .4; }
 .trow.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
@@ -215,10 +216,10 @@ select.select { background: var(--surface); border: 1px solid var(--line); borde
 .thead { color: var(--faint); font-size: 13px; border-bottom: 1px solid var(--line); border-radius: 0; margin-bottom: 6px; padding-bottom: 8px; }
 .thead:hover { background: none; }
 .eq-anim { display: inline-flex; gap: 2px; height: 14px; align-items: flex-end; }
-.eq-anim b { width: 3px; background: var(--accent); animation: eqb 1s ease-in-out infinite; }
+.eq-anim b { width: 3px; height: 14px; background: var(--accent); transform-origin: bottom; animation: eqb 1s ease-in-out infinite; will-change: transform; }
 .eq-anim b:nth-child(2) { animation-delay: -.4s; } .eq-anim b:nth-child(3) { animation-delay: -.7s; }
 .paused .eq-anim b { animation-play-state: paused; }
-@keyframes eqb { 0%,100% { height: 3px } 50% { height: 14px } }
+@keyframes eqb { 0%,100% { transform: scaleY(.22) } 50% { transform: scaleY(1) } }
 
 .empty { text-align: center; padding: 70px 20px; color: var(--muted); max-width: 440px; margin: 0 auto; }
 .empty h3 { font-size: 22px; color: var(--text); margin-bottom: 8px; }
@@ -272,14 +273,14 @@ input[type="range"]:hover::-webkit-slider-thumb, input[type="range"]:focus-visib
 .disc .label::after { content: ""; position: absolute; inset: 44%; border-radius: 50%; background: var(--bg); box-shadow: 0 0 0 2px rgba(0,0,0,.4); }
 .disc.mini { width: 56px; height: 56px; box-shadow: 0 0 0 1px var(--line); }
 .disc.mini .label { width: 60%; height: 60%; }
-.spinning .disc { animation: spin 5s linear infinite; }
+.spinning .disc { animation: spin 5s linear infinite; will-change: transform; }
 .paused .disc, .disc.idle { animation-play-state: paused !important; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---------------------------------------------------------------- now playing */
 .nowplaying { position: fixed; inset: 0; z-index: 40; background: var(--bg); display: flex; flex-direction: column; padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px); animation: rise .28s cubic-bezier(.2,.8,.2,1); overflow: hidden; }
 @keyframes rise { from { transform: translateY(40px); opacity: 0; } }
-.np-bg { position: absolute; inset: -20%; background-size: cover; background-position: center; filter: blur(70px) saturate(1.3); opacity: .32; pointer-events: none; }
+.np-bg { position: absolute; inset: 0; background-size: cover; background-position: center; opacity: .34; pointer-events: none; }
 .np-head { position: relative; display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; }
 .np-from { color: var(--muted); font-weight: 600; font-size: 14px; text-align: center; }
 .np-stage { position: relative; flex: 1; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, .9fr); gap: 56px; align-items: center; padding: 0 6vw 40px; min-height: 0; }
@@ -507,3 +508,13 @@ input.time:focus, .text-in:focus { border-color: var(--accent); }
 .pr-head b { text-transform: capitalize; }
 .pr-head span, .pr-song { color: var(--faint); font-size: 13px; }
 .pr-msg { color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
+
+/* ---------------------------------------------------------------- smooth mode (budget phones) */
+.lite .spinning .disc.mini { animation: none; will-change: auto; }
+.lite .nowplaying, .lite .toast { animation: none; }
+.lite .disc.big { box-shadow: 0 10px 28px rgba(0,0,0,.45); }
+.lite .np-lyrics { mask-image: none; }
+.lite .eq-anim b { animation-duration: 1.4s; }
+@media (prefers-reduced-motion: reduce) {
+  .spinning .disc, .eq-anim b, .nowplaying, .toast { animation: none !important; }
+}

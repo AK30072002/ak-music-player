@@ -65,6 +65,15 @@ Everything runs on your phone. Install the app and start playing: no computer an
 | **Always up to date** | The app updates its downloader by itself once a day, so it keeps working when sites change |
 | **Looks** | Dark and light themes, spinning-record player with a live visualizer |
 
+## What's new in 3.0.0 (final version)
+
+- **Long songs and mixes (1–2+ hours) play in seconds.** Songs longer than 10 minutes stream straight from the site instead of downloading 100+ MB first; seeking works and nothing big is stored on the phone. A YouTube link to a song inside a "Mix" adds just that song.
+- **No more crashes when the phone runs low on memory:** if Android stops the player screen, the app rebuilds it and carries on playing where it was. If the app ever does close, **Settings → Recent problems** shows why.
+- **Pauses when you unplug headphones or your Bluetooth headset disconnects.**
+- **Smoother on budget phones:** no heavy screen blur, the visualizer and animations rest when nothing moves, nothing is drawn while the screen is off, artwork is shrunk to phone size, long lists render only what's on screen, and the editor's waveform uses very little memory. **Settings → Smooth mode** (on by default in the app).
+- **Storage limit:** offline copies of songs from links are kept up to 2 GB (change it in **Settings → Storage**, or free up space in one tap); temporary files are cleaned automatically.
+- **Settings → Background playback:** one tap lets the app keep playing with the screen off on phones with strict battery savers (Xiaomi, Redmi, POCO…).
+
 ## What's new in 2.3.0
 
 - **Starts faster:** the music engine no longer loads its YouTube downloader before the player opens (it loads in the background), and tool checks run only once per app version. The loading screen shows what it's doing.
@@ -97,7 +106,10 @@ Open **Settings → Recent problems** and take a screenshot; it shows exactly wh
 Sites change often. The app updates its downloader by itself once a day: close the app completely (swipe it away), wait a minute, and open it again. If it still fails, install the newest APK from the releases page.
 
 **Music stops when the screen is off**
-Android Settings → Apps → AK Music Player → Battery → **Unrestricted**. Some phones (Xiaomi, Oppo, Vivo, Realme, Samsung) need this.
+In the app: **Settings → Background playback → Allow background playback**. Or Android Settings → Apps → AK Music Player → Battery → **Unrestricted** (Xiaomi / Redmi / POCO: Battery saver → **No restrictions**, and turn on **Autostart**). Some phones (Xiaomi, Oppo, Vivo, Realme, Samsung) need this.
+
+**The phone is running out of space**
+**Settings → Storage**: lower the limit for offline copies or tap **Free up space now**. Your library, playlists, uploads and edited songs are kept.
 
 **"The music engine couldn't start"**
 Tap **Try again**. If it keeps happening, make sure the phone has at least 150 MB free, then reinstall the app.
